@@ -501,6 +501,7 @@ always@(posedge clk_sys) begin
 			end
 `ifndef MISTER_DEBUG_NOHDMI
 			if(cmd == 'h3E) {shadowmask_wr,shadowmask_data} <= {1'b1, io_din};
+			if(cmd == 'h45) {vis_warp_cmd_wr,vis_warp_cmd_data} <= {1'b1, io_din};   // VIS_WARP config (Phase 2)
 			if(cmd == 'h40) begin
 				case(cnt[3:0])
 					0: io_dout_sys <= {arxy, arx};
@@ -1710,13 +1711,62 @@ sync_fix sync_h(clk_vid, hs_emu, hs_fix);
 wire  [6:0] user_out, user_in;
 
 assign clk_ihdmi= clk_vid;
-assign ce_hpix  = vga_ce_sl;
-assign hr_out   = vga_data_sl[23:16];
-assign hg_out   = vga_data_sl[15:8];
-assign hb_out   = vga_data_sl[7:0];
-assign hhs_fix  = vga_hs_sl;
-assign hvs_fix  = vga_vs_sl;
-assign hde_emu  = vga_de_sl;
+
+// ====== vis_warp insertion (Phase 2 framework integration) ======
+// Sits between post-scanlines vga_data_sl and ascal's i_r/i_g/i_b inputs.
+// HDMI-path only -- direct-video (analog VGA) tap is taken upstream.
+// Configured via HPS_BUS command 0x45 (UIO_VIS_WARP).
+// STUB version: passthrough only, no DDR3 access. Will be replaced 1:1
+// with the full Phase 2 module (DDR3-backed warp + bilinear + bloom +
+// scanlines) once development in pacman-vis/sim/rtl/ reaches stage 4.
+reg [15:0] vis_warp_cmd_data;
+reg        vis_warp_cmd_wr = 0;
+
+wire [23:0] vw_dout;
+wire        vw_hs, vw_vs, vw_de, vw_ce_pix;
+wire [27:0] vw_avl_address;
+wire [127:0] vw_avl_writedata;
+wire [15:0]  vw_avl_byteenable;
+wire [7:0]   vw_avl_burstcount;
+wire         vw_avl_write, vw_avl_read;
+
+vis_warp vis_warp_inst (
+	.clk_sys     (clk_sys),
+	.clk_in      (clk_vid),
+	.clk_out     (clk_hdmi),
+	.cmd_wr      (vis_warp_cmd_wr),
+	.cmd_in      (vis_warp_cmd_data),
+	.ce_pix_in   (vga_ce_sl),
+	.din         (vga_data_sl),
+	.hs_in       (vga_hs_sl),
+	.vs_in       (vga_vs_sl),
+	.de_in       (vga_de_sl),
+	.ce_pix_out  (vw_ce_pix),
+	.dout        (vw_dout),
+	.hs_out      (vw_hs),
+	.vs_out      (vw_vs),
+	.de_out      (vw_de),
+	.display_w   (WIDTH),
+	.display_h   (HEIGHT),
+	.fb_en       (FB_EN),
+	.avl_address       (vw_avl_address),
+	.avl_burstcount    (vw_avl_burstcount),
+	.avl_writedata     (vw_avl_writedata),
+	.avl_byteenable    (vw_avl_byteenable),
+	.avl_write         (vw_avl_write),
+	.avl_read          (vw_avl_read),
+	.avl_readdata      (128'd0),       // stub: no DDR3 read response
+	.avl_readdatavalid (1'b0),
+	.avl_waitrequest   (1'b0)
+);
+
+assign ce_hpix  = vw_ce_pix;
+assign hr_out   = vw_dout[23:16];
+assign hg_out   = vw_dout[15:8];
+assign hb_out   = vw_dout[7:0];
+assign hhs_fix  = vw_hs;
+assign hvs_fix  = vw_vs;
+assign hde_emu  = vw_de;
 
 wire uart_dtr;
 wire uart_dsr;
