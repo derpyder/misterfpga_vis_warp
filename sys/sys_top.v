@@ -694,6 +694,11 @@ ddr_svc ddr_svc
 wire clk_pal = clk_audio;
 
 
+// ---- vbuf channel ----
+// vbuf_* (master side) connects sysmem.vbuf to the vbuf_svc arbiter.
+// vbuf_ascal_* (ch0 slave) is ascal's view of the shared port.
+// vbuf_vw_* (ch1 slave) is vis_warp's view; declared near the vis_warp
+// instance below.
 wire  [27:0] vbuf_address;
 wire   [7:0] vbuf_burstcount;
 wire         vbuf_waitrequest;
@@ -703,6 +708,65 @@ wire         vbuf_read;
 wire [127:0] vbuf_writedata;
 wire  [15:0] vbuf_byteenable;
 wire         vbuf_write;
+
+// ch0 slave -- ascal side
+wire  [27:0] vbuf_ascal_address;
+wire   [7:0] vbuf_ascal_burstcount;
+wire         vbuf_ascal_waitrequest;
+wire [127:0] vbuf_ascal_readdata;
+wire         vbuf_ascal_readdatavalid;
+wire         vbuf_ascal_read;
+wire [127:0] vbuf_ascal_writedata;
+wire  [15:0] vbuf_ascal_byteenable;
+wire         vbuf_ascal_write;
+
+// ch1 slave -- vis_warp side (driven from vw_avl_* declared near the
+// vis_warp instance later in this file)
+wire  [27:0] vbuf_vw_address;
+wire   [7:0] vbuf_vw_burstcount;
+wire         vbuf_vw_waitrequest;
+wire [127:0] vbuf_vw_readdata;
+wire         vbuf_vw_readdatavalid;
+wire         vbuf_vw_read;
+wire [127:0] vbuf_vw_writedata;
+wire  [15:0] vbuf_vw_byteenable;
+wire         vbuf_vw_write;
+
+vbuf_svc vbuf_svc_inst
+(
+    .clk                 (clk_100m),
+
+    .ram_waitrequest     (),                          // unused output
+    .ram_burstcount      (vbuf_burstcount),
+    .ram_addr            (vbuf_address),
+    .ram_writedata       (vbuf_writedata),
+    .ram_byteenable      (vbuf_byteenable),
+    .ram_read            (vbuf_read),
+    .ram_write           (vbuf_write),
+    .ram_waitrequest_in  (vbuf_waitrequest),
+    .ram_readdata        (vbuf_readdata),
+    .ram_readdatavalid   (vbuf_readdatavalid),
+
+    .ch0_address         (vbuf_ascal_address),
+    .ch0_burstcount      (vbuf_ascal_burstcount),
+    .ch0_writedata       (vbuf_ascal_writedata),
+    .ch0_byteenable      (vbuf_ascal_byteenable),
+    .ch0_read            (vbuf_ascal_read),
+    .ch0_write           (vbuf_ascal_write),
+    .ch0_readdata        (vbuf_ascal_readdata),
+    .ch0_readdatavalid   (vbuf_ascal_readdatavalid),
+    .ch0_waitrequest     (vbuf_ascal_waitrequest),
+
+    .ch1_address         (vbuf_vw_address),
+    .ch1_burstcount      (vbuf_vw_burstcount),
+    .ch1_writedata       (vbuf_vw_writedata),
+    .ch1_byteenable      (vbuf_vw_byteenable),
+    .ch1_read            (vbuf_vw_read),
+    .ch1_write           (vbuf_vw_write),
+    .ch1_readdata        (vbuf_vw_readdata),
+    .ch1_readdatavalid   (vbuf_vw_readdatavalid),
+    .ch1_waitrequest     (vbuf_vw_waitrequest)
+);
 
 wire  [23:0] hdmi_data;
 wire         hdmi_vs, hdmi_hs, hdmi_de, hdmi_vbl, hdmi_brd;
@@ -819,15 +883,15 @@ wire         bob_deint;
 		.o_fb_stride      (FB_STRIDE),
 
 		.avl_clk          (clk_100m),
-		.avl_waitrequest  (vbuf_waitrequest),
-		.avl_readdata     (vbuf_readdata),
-		.avl_readdatavalid(vbuf_readdatavalid),
-		.avl_burstcount   (vbuf_burstcount),
-		.avl_writedata    (vbuf_writedata),
-		.avl_address      (vbuf_address),
-		.avl_write        (vbuf_write),
-		.avl_read         (vbuf_read),
-		.avl_byteenable   (vbuf_byteenable)
+		.avl_waitrequest  (vbuf_ascal_waitrequest),
+		.avl_readdata     (vbuf_ascal_readdata),
+		.avl_readdatavalid(vbuf_ascal_readdatavalid),
+		.avl_burstcount   (vbuf_ascal_burstcount),
+		.avl_writedata    (vbuf_ascal_writedata),
+		.avl_address      (vbuf_ascal_address),
+		.avl_write        (vbuf_ascal_write),
+		.avl_read         (vbuf_ascal_read),
+		.avl_byteenable   (vbuf_ascal_byteenable)
 	);
 `endif
 
@@ -1724,12 +1788,12 @@ reg        vis_warp_cmd_wr = 0;
 
 wire [23:0] vw_dout;
 wire        vw_hs, vw_vs, vw_de, vw_ce_pix;
-wire [27:0] vw_avl_address;
-wire [127:0] vw_avl_writedata;
-wire [15:0]  vw_avl_byteenable;
-wire [7:0]   vw_avl_burstcount;
-wire         vw_avl_write, vw_avl_read;
 
+// vis_warp drives the vbuf_svc ch1 slave directly. The stub still emits
+// avl_write=0 / avl_read=0 / writedata=0, so vbuf_svc sees no ch1
+// traffic and the behavior is identical to the pre-arbiter wiring.
+// When the real Phase 2 RTL replaces the stub (B3), this same wiring
+// carries actual DDR3 read/write traffic.
 vis_warp vis_warp_inst (
 	.clk_sys     (clk_sys),
 	.clk_in      (clk_vid),
@@ -1749,15 +1813,15 @@ vis_warp vis_warp_inst (
 	.display_w   (WIDTH),
 	.display_h   (HEIGHT),
 	.fb_en       (FB_EN),
-	.avl_address       (vw_avl_address),
-	.avl_burstcount    (vw_avl_burstcount),
-	.avl_writedata     (vw_avl_writedata),
-	.avl_byteenable    (vw_avl_byteenable),
-	.avl_write         (vw_avl_write),
-	.avl_read          (vw_avl_read),
-	.avl_readdata      (128'd0),       // stub: no DDR3 read response
-	.avl_readdatavalid (1'b0),
-	.avl_waitrequest   (1'b0)
+	.avl_address       (vbuf_vw_address),
+	.avl_burstcount    (vbuf_vw_burstcount),
+	.avl_writedata     (vbuf_vw_writedata),
+	.avl_byteenable    (vbuf_vw_byteenable),
+	.avl_write         (vbuf_vw_write),
+	.avl_read          (vbuf_vw_read),
+	.avl_readdata      (vbuf_vw_readdata),
+	.avl_readdatavalid (vbuf_vw_readdatavalid),
+	.avl_waitrequest   (vbuf_vw_waitrequest)
 );
 
 assign ce_hpix  = vw_ce_pix;
