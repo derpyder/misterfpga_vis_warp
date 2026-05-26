@@ -1780,20 +1780,30 @@ assign clk_ihdmi= clk_vid;
 // Sits between post-scanlines vga_data_sl and ascal's i_r/i_g/i_b inputs.
 // HDMI-path only -- direct-video (analog VGA) tap is taken upstream.
 // Configured via HPS_BUS command 0x45 (UIO_VIS_WARP).
-// STUB version: passthrough only, no DDR3 access. Will be replaced 1:1
-// with the full Phase 2 module (DDR3-backed warp + bilinear + bloom +
-// scanlines) once development in pacman-vis/sim/rtl/ reaches stage 4.
+//
+// vis_warp (sys/vis_warp.vhd) is now the FRAMEWORK WRAPPER: it decodes
+// Agent C's 4-opcode encoding (flags / curvature / bloom / scanlines)
+// into 6 stable control registers, applies fb_en bypass at the wrapper
+// level (MISTER_FB cores stay invisible), and instantiates
+// vis_warp_v2 (sys/vis_warp_v2.vhd) which is the implementation that
+// will be swapped 1:1 with Agent A's real Phase 2 RTL once stage 4
+// lands (B3 in fpga/pacman-vis/SPEC-phase2-agent-B-framework.md).
+//
+// Today's vis_warp_v2 is a passthrough stand-in with the EXACT port
+// shape of A's wip-stage3c-rescue HEAD, so swapping in the real RTL
+// later is a file copy + sys.qip addition for the v2 packages.
 reg [15:0] vis_warp_cmd_data;
 reg        vis_warp_cmd_wr = 0;
 
 wire [23:0] vw_dout;
 wire        vw_hs, vw_vs, vw_de, vw_ce_pix;
 
-// vis_warp drives the vbuf_svc ch1 slave directly. The stub still emits
-// avl_write=0 / avl_read=0 / writedata=0, so vbuf_svc sees no ch1
-// traffic and the behavior is identical to the pre-arbiter wiring.
-// When the real Phase 2 RTL replaces the stub (B3), this same wiring
-// carries actual DDR3 read/write traffic.
+// vis_warp drives the vbuf_svc ch1 slave directly. The stand-in still
+// emits avl_write=0 / avl_read=0 / writedata=0, so vbuf_svc sees no ch1
+// traffic in the wrapper-with-stand-in configuration and behavior is
+// identical to the pre-arbiter wiring. When B3 swaps the stand-in for
+// the real v2 RTL, the same wiring carries actual DDR3 read/write
+// traffic without further sys_top.v changes.
 vis_warp vis_warp_inst (
 	.clk_sys     (clk_sys),
 	.clk_in      (clk_vid),

@@ -331,7 +331,8 @@ begin
     --      OR keeps them alive; same trick for unused inputs. These all go
     --      away (replaced by real wiring) when Agent A exposes the missing
     --      v2 input ports. ----
-    ctl_keep <= "00000000"
+    -- Widths: 9 + 1 + 1 + 1 + 2 + 1 + 1 = 16 bits, matches ctl_keep.
+    ctl_keep <= "000000000"
               & reg_bilinear
               & reg_bloom_en
               & reg_scan_en
