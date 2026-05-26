@@ -128,11 +128,29 @@ architecture wrapper of vis_warp is
     signal v2_dbg_x      : integer;
     signal v2_dbg_y      : integer;
 
-    -- Lint keepers for control bits not yet consumed by v2 (the gap list:
-    -- bilinear, bloom_en, bloom_mode, bloom_gain, scan_en, scan_dens,
-    -- curvature). Wrapper still HOLDS them; B3 wires them once Agent A's
-    -- stage 4 adds the corresponding v2 input ports.
-    signal ctl_keep      : std_logic_vector(15 downto 0);
+    -- ---- Firmware-writable, RTL-ignored regs ----
+    -- vis_warp_v2 stage 4 (edfffe1) does NOT expose runtime ports for
+    -- bilinear_en or curvature_k -- they are still compile-time generics
+    -- (curvature) or always-on (bilinear). Agent C's firmware writes them
+    -- via cmd 0x45 opcodes 000[1] and 001[2:0]; we hold them here so the
+    -- HPS_BUS contract is preserved and a future v2 revision can pick
+    -- them up without firmware changes. Marked with keep_signal so Quartus
+    -- won't strip the registers when synthesizing.
+    attribute keep_signal_name : string;
+    attribute keep_signal_name of reg_bilinear  : signal is "true";
+    attribute keep_signal_name of reg_curvature : signal is "true";
+
+    -- Derived bloom_mix_q8: firmware writes only reg_bloom_gain (Q0.4) via
+    -- opcode 0x010 -- there's no separate mix slider in the OSD yet. We
+    -- promote the same value to Q0.8 by left-shifting 4 bits so the lerp-
+    -- mode (bloom_mode=01) gets a non-trivial mix factor driven from the
+    -- same UI control as max-blend gain. Once firmware adds a 5th opcode
+    -- with its own mix payload, this derivation goes away.
+    signal bloom_mix_q8 : std_logic_vector(7 downto 0);
+
+    -- scanlines port: gate density through enable so v2 sees canonical
+    -- "00" (Off) when reg_scan_en='0', matching A's port semantics.
+    signal v2_scanlines : std_logic_vector(1 downto 0);
 
     signal display_w_keep : std_logic_vector(11 downto 0);
     signal display_h_keep : std_logic_vector(11 downto 0);
@@ -149,7 +167,7 @@ architecture wrapper of vis_warp is
     signal bypass_de_out     : std_logic := '0';
     signal bypass_ce_pix_out : std_logic := '0';
 
-    -- ---- Component declaration for v2 (uses positional? no, named) ----
+    -- ---- Component declaration for v2 (matches A's stage 4 entity) ----
     component vis_warp_v2 is
         generic (
             SRC_W       : integer := 288;
@@ -168,7 +186,14 @@ architecture wrapper of vis_warp is
         port (
             clk         : in  std_logic;
             reset       : in  std_logic;
-            warp_en     : in  std_logic;
+
+            -- Runtime FX controls (stage 4 contract)
+            warp_en       : in  std_logic;
+            bloom_en      : in  std_logic;
+            bloom_mode    : in  unsigned(1 downto 0);
+            bloom_mix_q8  : in  unsigned(7 downto 0);
+            bloom_gain    : in  unsigned(3 downto 0);
+            scanlines     : in  unsigned(1 downto 0);
 
             ce_pix_in   : in  std_logic;
             din         : in  std_logic_vector(23 downto 0);
@@ -256,6 +281,15 @@ begin
     -- The 12-bit runtime display_w/display_h are kept on the wrapper
     -- entity so the contract with sys_top stays unchanged; they're just
     -- not consumed by the v2 of today.
+
+    -- Derive bloom_mix_q8 from reg_bloom_gain (Q0.4 -> Q0.8 by <<4).
+    -- See "Firmware-writable, RTL-ignored regs" block above for rationale.
+    bloom_mix_q8 <= reg_bloom_gain & "0000";
+
+    -- Gate scan density through enable: when reg_scan_en='0', v2 sees
+    -- canonical "00" (Off) regardless of what density was last written.
+    v2_scanlines <= reg_scan_dens when reg_scan_en = '1' else "00";
+
     u_v2 : vis_warp_v2
         generic map (
             SRC_W       => 288,
@@ -274,7 +308,12 @@ begin
         port map (
             clk         => clk_sys,        -- single-clock for now; B4 fixes
             reset       => v2_reset,
-            warp_en     => reg_enable,
+            warp_en      => reg_enable,
+            bloom_en     => reg_bloom_en,
+            bloom_mode   => unsigned(reg_bloom_mode),
+            bloom_mix_q8 => unsigned(bloom_mix_q8),
+            bloom_gain   => unsigned(reg_bloom_gain),
+            scanlines    => unsigned(v2_scanlines),
 
             ce_pix_in   => v2_ce_pix_in,
             din         => v2_din,
@@ -327,19 +366,13 @@ begin
     vs_out     <= bypass_vs_out     when fb_en = '1' else v2_vs_out;
     de_out     <= bypass_de_out     when fb_en = '1' else v2_de_out;
 
-    -- ---- Lint hygiene -- bundle unused control regs together so a single
-    --      OR keeps them alive; same trick for unused inputs. These all go
-    --      away (replaced by real wiring) when Agent A exposes the missing
-    --      v2 input ports. ----
-    -- Widths: 9 + 1 + 1 + 1 + 2 + 1 + 1 = 16 bits, matches ctl_keep.
-    ctl_keep <= "000000000"
-              & reg_bilinear
-              & reg_bloom_en
-              & reg_scan_en
-              & reg_bloom_mode
-              & reg_scan_dens(0)
-              & reg_curvature(0);
-
+    -- ---- Lint hygiene ----
+    -- All control regs except reg_bilinear and reg_curvature now feed real
+    -- v2 ports. Those two carry keep_signal attributes (see declarations
+    -- above) so Quartus retains the register storage even though no
+    -- consumer exists today.
+    -- display_w/h are still wrapper-only (v2 uses compile-time generics);
+    -- keep them alive against synth elimination via the keep signals below.
     display_w_keep <= display_w;
     display_h_keep <= display_h;
 
