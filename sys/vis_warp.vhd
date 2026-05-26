@@ -134,11 +134,17 @@ architecture wrapper of vis_warp is
     -- (curvature) or always-on (bilinear). Agent C's firmware writes them
     -- via cmd 0x45 opcodes 000[1] and 001[2:0]; we hold them here so the
     -- HPS_BUS contract is preserved and a future v2 revision can pick
-    -- them up without firmware changes. Marked with keep_signal so Quartus
-    -- won't strip the registers when synthesizing.
-    attribute keep_signal_name : string;
-    attribute keep_signal_name of reg_bilinear  : signal is "true";
-    attribute keep_signal_name of reg_curvature : signal is "true";
+    -- them up without firmware changes.
+    --
+    -- Quartus attributes "keep" + "noprune" together keep the register
+    -- storage and prevent dead-code elimination at the netlist level.
+    -- (GHDL ignores both, which is fine -- sim doesn't strip signals.)
+    attribute keep    : boolean;
+    attribute noprune : boolean;
+    attribute keep    of reg_bilinear  : signal is true;
+    attribute keep    of reg_curvature : signal is true;
+    attribute noprune of reg_bilinear  : signal is true;
+    attribute noprune of reg_curvature : signal is true;
 
     -- Derived bloom_mix_q8: firmware writes only reg_bloom_gain (Q0.4) via
     -- opcode 0x010 -- there's no separate mix slider in the OSD yet. We

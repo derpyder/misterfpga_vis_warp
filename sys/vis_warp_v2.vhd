@@ -144,21 +144,36 @@ architecture rtl of vis_warp_v2 is
     -- ay2_q24 = (phys_h^2) / phys_corner2 * 2^24
     -- where phys_w = ARX/DST_W, phys_h = ARY/DST_H,
     -- phys_corner2 = (phys_w * DST_CX)^2 + (phys_h * DST_CY)^2.
+    -- NB: Quartus 17.0 (Cyclone V Lite) rejects `real(2**24)` and
+    -- `(real_val)**2` as ambiguous between universal_integer and
+    -- integer overloads of "**". A's RTL uses ieee.math_real, which
+    -- exposes a real-typed "**" via the standard.  We sidestep the
+    -- ambiguity by (a) hoisting 2**24 to a real literal 16777216.0,
+    -- and (b) rewriting x**2 as x*x. Behaviour is identical, both
+    -- under Quartus and under GHDL --std=08.
+    constant TWO_TO_24_REAL : real := 16777216.0;
+
     function compute_ax2 return integer is
         variable phys_w, phys_h, phys_corner2 : real;
+        variable px, py : real;
     begin
         phys_w := real(ARX) / real(DST_W);
         phys_h := real(ARY) / real(DST_H);
-        phys_corner2 := (phys_w * real(DST_CX))**2 + (phys_h * real(DST_CY))**2;
-        return integer(round( (phys_w**2) / phys_corner2 * real(2**24) ));
+        px := phys_w * real(DST_CX);
+        py := phys_h * real(DST_CY);
+        phys_corner2 := px*px + py*py;
+        return integer(round( (phys_w*phys_w) / phys_corner2 * TWO_TO_24_REAL ));
     end function;
     function compute_ay2 return integer is
         variable phys_w, phys_h, phys_corner2 : real;
+        variable px, py : real;
     begin
         phys_w := real(ARX) / real(DST_W);
         phys_h := real(ARY) / real(DST_H);
-        phys_corner2 := (phys_w * real(DST_CX))**2 + (phys_h * real(DST_CY))**2;
-        return integer(round( (phys_h**2) / phys_corner2 * real(2**24) ));
+        px := phys_w * real(DST_CX);
+        py := phys_h * real(DST_CY);
+        phys_corner2 := px*px + py*py;
+        return integer(round( (phys_h*phys_h) / phys_corner2 * TWO_TO_24_REAL ));
     end function;
     constant AX2_DST_Q24 : integer := compute_ax2;
     constant AY2_DST_Q24 : integer := compute_ay2;
@@ -412,7 +427,11 @@ begin
                         wr_pending <= '1';
                         wr_pix_phase <= 0;
                         report "    WRITE: addr=" & integer'image(v_addr_word)
-                            & " data_pix0=0x" & to_hstring(wr_pix0)
+                            -- to_hstring(wr_pix0) replaced for Quartus 17.0
+                            -- compatibility -- 17.0 lacks VHDL-2008 hex
+                            -- formatters on std_logic_vector. Show as int.
+                            & " data_pix0=0x"
+                            & integer'image(to_integer(unsigned(wr_pix0)))
                             & " bank_sel=" & std_logic'image(bank_sel);
                     else
                         wr_pix_phase <= wr_pix_phase + 1;
@@ -649,7 +668,7 @@ begin
                                     & integer'image(cf_target_slot)
                                     & " row=" & integer'image(cf_target_row)
                                     & " data0=0x"
-                                    & to_hstring(cache_data(cf_target_slot)(0));
+                                    & integer'image(to_integer(unsigned(cache_data(cf_target_slot)(0))));
                             end if;
                     end case;
                 end if;
@@ -768,7 +787,7 @@ begin
                                 & " sloty=" & integer'image(v_slot_y)
                                 & " sloty1=" & integer'image(v_slot_y1)
                                 & " cache_data(sloty1)(0)=0x"
-                                & to_hstring(cache_data(v_slot_y1)(0));
+                                & integer'image(to_integer(unsigned(cache_data(v_slot_y1)(0))));
                         end if;
                         if v_oob then
                             dout_int <= (others => '0');
