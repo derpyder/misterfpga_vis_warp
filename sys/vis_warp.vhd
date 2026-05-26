@@ -136,7 +136,18 @@ architecture wrapper of vis_warp is
 
     signal display_w_keep : std_logic_vector(11 downto 0);
     signal display_h_keep : std_logic_vector(11 downto 0);
-    signal fb_en_keep     : std_logic;
+
+    -- ---- fb_en bypass plumbing ----
+    -- When fb_en='1' (MISTER_FB cores like N64) the core has already
+    -- rendered a framebuffer; ascal reads it directly and vis_warp must
+    -- be invisible. We implement bypass at the WRAPPER level so it is
+    -- guaranteed independent of whatever v2 is doing internally. The
+    -- 1-cycle latch matches the stub's original passthrough timing.
+    signal bypass_dout       : std_logic_vector(23 downto 0) := (others => '0');
+    signal bypass_hs_out     : std_logic := '0';
+    signal bypass_vs_out     : std_logic := '0';
+    signal bypass_de_out     : std_logic := '0';
+    signal bypass_ce_pix_out : std_logic := '0';
 
     -- ---- Component declaration for v2 (uses positional? no, named) ----
     component vis_warp_v2 is
@@ -291,13 +302,30 @@ begin
             dbg_cnt_y_o => v2_dbg_y
         );
 
-    -- ---- Wrapper outputs come straight from v2 (fb_en bypass added next
-    --      commit; today wrapper = v2 unconditionally) ----
-    dout       <= v2_dout;
-    ce_pix_out <= v2_ce_pix_out;
-    hs_out     <= v2_hs_out;
-    vs_out     <= v2_vs_out;
-    de_out     <= v2_de_out;
+    -- ---- fb_en bypass: clk_in passthrough mirroring the old stub ----
+    process(clk_in)
+    begin
+        if rising_edge(clk_in) then
+            if ce_pix_in = '1' then
+                bypass_dout   <= din;
+                bypass_hs_out <= hs_in;
+                bypass_vs_out <= vs_in;
+                bypass_de_out <= de_in;
+            end if;
+            bypass_ce_pix_out <= ce_pix_in;
+        end if;
+    end process;
+
+    -- ---- Output MUX: fb_en selects between v2 and the bypass latch ----
+    -- fb_en is on clk_sys but we treat it as a slow-changing config bit
+    -- here; for HW, fb_en is held stable for the duration of a MISTER_FB
+    -- frame, so a glitch-free combinatorial mux is fine. If timing
+    -- closure flags this path it becomes one of the B4 CDC cleanups.
+    dout       <= bypass_dout       when fb_en = '1' else v2_dout;
+    ce_pix_out <= bypass_ce_pix_out when fb_en = '1' else v2_ce_pix_out;
+    hs_out     <= bypass_hs_out     when fb_en = '1' else v2_hs_out;
+    vs_out     <= bypass_vs_out     when fb_en = '1' else v2_vs_out;
+    de_out     <= bypass_de_out     when fb_en = '1' else v2_de_out;
 
     -- ---- Lint hygiene -- bundle unused control regs together so a single
     --      OR keeps them alive; same trick for unused inputs. These all go
@@ -313,6 +341,5 @@ begin
 
     display_w_keep <= display_w;
     display_h_keep <= display_h;
-    fb_en_keep     <= fb_en;
 
 end architecture;
