@@ -161,6 +161,92 @@ architecture rtl of vis_warp_v2_wp is
     -- both the pipe insertion (rd_en) and the Avalon master mux.
     signal read_fire : std_logic;
 
+    -- ============================================================
+    -- WARP PIPELINE (move 8 — timing closure on clk_hdmi)
+    -- ============================================================
+    -- The warp math was a single deep combinational chain in move 5b
+    -- (~9 dependent multiplies + LUT + clamp). At HDMI pixel clock
+    -- (~148.5 MHz, 6.7 ns period) that chain took ~66 ns → -59 ns
+    -- setup slack in the FIT. Move 8 splits it into N_WARP_STAGES
+    -- registered stages, each with ≤1 multiply, so each stage fits
+    -- comfortably in one clk_hdmi period.
+    --
+    -- side_pipe carries position + sync state through the pipeline
+    -- so that when the warp result emerges at stage N_WARP_STAGES,
+    -- it can be paired with the *correct* output pixel's (de, hs, vs).
+    -- s2..s11 are the live arithmetic outputs per stage.
+    constant N_WARP_STAGES : integer := 16;
+
+    type warp_side_t is record
+        cnt_x_o  : integer range 0 to MAX_DST_W + 4095;  -- room for HBLANK
+        cnt_y_o  : integer range 0 to MAX_DST_H + 4095;
+        dx       : signed(15 downto 0);
+        dy       : signed(15 downto 0);
+        de       : std_logic;
+        hs       : std_logic;
+        vs       : std_logic;
+        v_in_act : std_logic;
+        warp_en  : std_logic;
+        k        : unsigned(2 downto 0);
+    end record;
+
+    constant WARP_SIDE_ZERO : warp_side_t := (
+        cnt_x_o => 0, cnt_y_o => 0,
+        dx => (others => '0'), dy => (others => '0'),
+        de => '0', hs => '0', vs => '0',
+        v_in_act => '0', warp_en => '0',
+        k => (others => '0')
+    );
+
+    type warp_side_pipe_t is array (1 to N_WARP_STAGES) of warp_side_t;
+    signal side_pipe : warp_side_pipe_t := (others => WARP_SIDE_ZERO);
+
+    -- Live arithmetic per stage. Each is the REGISTERED output of stage N,
+    -- valid as input to stage N+1.
+    -- Width-narrowing for DSP block fit: the realistic max under any
+    -- sane dst dim (MAX_DST_W=1920 → dx max=960, dx² max ≈ 9.2e5) fits
+    -- in 21 bits unsigned. signed(26:0) gives generous headroom while
+    -- keeping the operand within Cyclone V's 27×27 DSP block (single
+    -- block, no inter-block routing delay). Original signed(31:0) was
+    -- forcing Quartus to span 2 DSPs which busted clk_hdmi by ~3 ns.
+    signal s2_dx2, s2_dy2          : signed(26 downto 0) := (others => '0');
+    -- AX2 ≤ 508 fits in signed(10:0). Product max ≈ 5e8 → signed(30:0).
+    signal s3_ax2dx2, s3_ay2dy2    : signed(30 downto 0) := (others => '0');
+    signal s4_r2                   : signed(31 downto 0) := (others => '0');
+    signal s5_m_lo, s5_m_hi        : unsigned(15 downto 0) := (others => '0');
+    signal s5_frac                 : unsigned(7 downto 0) := (others => '0');
+    -- Stage 5b: buffer the ROM outputs through a flip-flop with normal
+    -- clock-to-Q. The altsyncram block's PORT_A clock-to-Q (~5 ns) leaves
+    -- no headroom for the sub+mul that follows; a single intervening
+    -- register restores per-stage timing closure.
+    signal s5b_m_lo, s5b_m_hi      : unsigned(15 downto 0) := (others => '0');
+    signal s5b_frac                : unsigned(7 downto 0) := (others => '0');
+    -- Stage 5c: separates the sub (m_hi - m_lo) from the mul (×frac).
+    -- Combining them in one cycle put the path ~2 ns over budget.
+    signal s5c_m_diff              : signed(16 downto 0) := (others => '0');
+    signal s5c_m_lo                : unsigned(15 downto 0) := (others => '0');
+    signal s5c_frac                : unsigned(7 downto 0) := (others => '0');
+    signal s6_m_diff_frac          : signed(24 downto 0) := (others => '0');
+    signal s6_m_lo                 : unsigned(15 downto 0) := (others => '0');
+    signal s7_m_raw                : unsigned(15 downto 0) := (others => '0');
+    -- Stage 7b: separate (m_raw - 32768) sub from the *K mul. Same
+    -- "sub + mul in one cycle" pattern as 5c → 6.
+    signal s7b_m_centered          : signed(17 downto 0) := (others => '0');
+    signal s8_m_scaled_pre         : signed(20 downto 0) := (others => '0');
+    signal s9_m_scaled             : unsigned(15 downto 0) := (others => '0');
+    signal s10_dx_m, s10_dy_m      : signed(31 downto 0) := (others => '0');
+    -- Stage 10b: split the (DST_C << 15) + dx*M add from the
+    -- downstream shift+clamp+warp_en-mux chain. The combined version
+    -- (~32-bit add + shift + 2 compares + 2 muxes) was just over budget.
+    signal s10b_src_x_q15          : signed(31 downto 0) := (others => '0');
+    signal s10b_src_y_q15          : signed(31 downto 0) := (others => '0');
+    signal s11_src_x, s11_src_y    : integer range 0 to 4095 := 0;
+    -- Stage 12: register the post-pipeline word-address computation
+    -- (mul s11_src_y * STRIDE + bank + s11_src_x/4) so pipe(0) only
+    -- has trivial register loads. The mul alone was ~0.5 ns over.
+    signal s12_word_addr           : integer := 0;
+    signal s12_lane                : integer range 0 to 3 := 0;
+
     -- ---- Warp helpers (used when warp_en='1') ----
     -- Lookup with linear interp. Returns M as Q1.15 unsigned.
     -- Salvaged from parked stage-3c work — concept is unchanged.
@@ -198,7 +284,7 @@ architecture rtl of vis_warp_v2_wp is
         variable result   : signed(17 downto 0);
     begin
         m_delta  := resize(signed('0' & std_logic_vector(m_raw)) - to_signed(32768, 17), 18);
-        m_scaled := resize(m_delta * signed('0' & std_logic_vector(k)), 21);
+        m_scaled := m_delta * signed('0' & std_logic_vector(k));
         result   := to_signed(32768, 18) + resize(shift_right(m_scaled, 1), 18);
         if result < 0 then
             return to_unsigned(0, 16);
@@ -300,28 +386,57 @@ begin
     end process;
 
     -- ============================================================
-    -- Read side: walk output raster, compute src coord, issue read,
-    -- shift sync info through delay line.
+    -- Read side: walk output raster, compute src coord via the
+    -- pipelined warp math, issue read, shift sync info through the
+    -- DDR3 delay line.
+    --
+    -- Pipeline structure (11 stages, each ≤1 multiply or ROM read):
+    --   S1: dx, dy = cnt_x_o/y - DST_CX/Y                     (subs)
+    --   S2: dx² (mul), dy² (mul)                              [parallel]
+    --   S3: AX2·dx² (mul), AY2·dy² (mul)                      [parallel]
+    --   S4: r² = AX2·dx² + AY2·dy²                            (add)
+    --   S5: m_lo, m_hi = LUT[idx], LUT[idx+1]; carry frac     (ROM)
+    --   S5b: buffer m_lo, m_hi, frac through a regular FF     (FF only — see note above)
+    --   S5c: m_diff = m_hi - m_lo; carry m_lo, frac           (sub only)
+    --   S6: m_diff * frac; carry m_lo                          (mul)
+    --   S7: m_raw = m_lo + (prod >> 8)                        (add+shift)
+    --   S7b: m_centered = m_raw - 32768                       (sub only)
+    --   S8: m_scaled_pre = m_centered * K                     (mul)
+    --   S9: m_scaled = clamp(32768 + m_scaled_pre/2)          (add+clamp)
+    --   S10: dx*m_scaled (mul), dy*m_scaled (mul)             [parallel]
+    --   S10b: src_q15 = (DST_C << 15) + dx*M                  (add only)
+    --   S11: src = clamp(src_q15 >> 15); warp_en mux          (shift+clamp+mux)
+    --   S12: word_addr = bank + src_y*STRIDE + src_x/4; lane  (mul+add)
+    -- After S12: pipe(0) registered from side_pipe(N_WARP_STAGES) + s12_*.
     -- ============================================================
     process(clk)
         variable v_total_x : integer;
         variable v_total_y : integer;
-        variable v_src_x   : integer;
-        variable v_src_y   : integer;
+        variable v_in_act  : boolean;
+        variable v_dst_cx  : integer;
+        variable v_dst_cy  : integer;
+        variable v_dx_int  : integer;
+        variable v_dy_int  : integer;
+        -- Stage 5 (LUT index) scratch
+        variable v_idx     : integer range 0 to 256;
+        variable v_frac    : unsigned(7 downto 0);
+        -- Stage 6 scratch
+        variable v_m_diff  : signed(16 downto 0);
+        -- Stage 9 (m_scaled clamp) scratch
+        variable v_m_acc   : integer;
+        -- Stage 11 (src clamp + warp_en mux) scratch
+        variable v_src_x_q15 : integer;
+        variable v_src_y_q15 : integer;
+        variable v_src_x_pre : integer;
+        variable v_src_y_pre : integer;
+        variable v_src_x_id  : integer;
+        variable v_src_y_id  : integer;
+        variable v_src_x_fin : integer;
+        variable v_src_y_fin : integer;
+        -- After S11: word addr + bank + lane
         variable v_base    : integer;
         variable v_word    : integer;
-        variable v_in_act  : boolean;
-        -- Warp-math scratch vars
-        variable v_dx, v_dy   : integer;
-        variable v_dx2, v_dy2 : integer;
-        variable v_r2         : integer;
-        variable v_m_raw      : unsigned(15 downto 0);
-        variable v_m_scaled   : unsigned(15 downto 0);
-        variable v_dst_cx     : integer;
-        variable v_dst_cy     : integer;
-        variable v_sxq15      : integer;
-        variable v_syq15      : integer;
-        variable v_sxi, v_syi : integer;
+        variable v_lane    : integer range 0 to 3;
     begin
         if rising_edge(clk) then
             if reset = '1' then
@@ -334,7 +449,27 @@ begin
                 src_x_now <= 0;
                 src_y_now <= 0;
                 read_active <= '0';
+                read_reg    <= '0';
                 rd_word_addr <= 0;
+                side_pipe <= (others => WARP_SIDE_ZERO);
+                s2_dx2 <= (others => '0'); s2_dy2 <= (others => '0');
+                s3_ax2dx2 <= (others => '0'); s3_ay2dy2 <= (others => '0');
+                s4_r2 <= (others => '0');
+                s5_m_lo <= (others => '0'); s5_m_hi <= (others => '0');
+                s5_frac <= (others => '0');
+                s5b_m_lo <= (others => '0'); s5b_m_hi <= (others => '0');
+                s5b_frac <= (others => '0');
+                s5c_m_diff <= (others => '0'); s5c_m_lo <= (others => '0');
+                s5c_frac <= (others => '0');
+                s6_m_diff_frac <= (others => '0'); s6_m_lo <= (others => '0');
+                s7_m_raw <= (others => '0');
+                s7b_m_centered <= (others => '0');
+                s8_m_scaled_pre <= (others => '0');
+                s9_m_scaled <= (others => '0');
+                s10_dx_m <= (others => '0'); s10_dy_m <= (others => '0');
+                s10b_src_x_q15 <= (others => '0'); s10b_src_y_q15 <= (others => '0');
+                s11_src_x <= 0; s11_src_y <= 0;
+                s12_word_addr <= 0; s12_lane <= 0;
             else
                 v_total_x := to_integer(dst_w) + HBLANK;
                 v_total_y := to_integer(dst_h) + VBLANK;
@@ -350,111 +485,219 @@ begin
                     cnt_x_o <= cnt_x_o + 1;
                 end if;
 
-                -- "In active area" for THIS cycle's counter value
+                -- ---- Combinational at stage 1 input ----
                 v_in_act := (cnt_x_o < to_integer(dst_w))
                             and (cnt_y_o < to_integer(dst_h));
+                v_dst_cx := to_integer(dst_w) / 2;
+                v_dst_cy := to_integer(dst_h) / 2;
+                v_dx_int := cnt_x_o - v_dst_cx;
+                v_dy_int := cnt_y_o - v_dst_cy;
 
-                -- Sync regen (1-cycle registered)
-                if v_in_act then
-                    de_o_int <= '1';
-                else
-                    de_o_int <= '0';
-                end if;
-                if cnt_x_o = to_integer(dst_w) then
-                    hs_o_int <= '1';
-                else
-                    hs_o_int <= '0';
-                end if;
+                -- (Legacy de_o_int/hs_o_int/vs_o_int kept as registered
+                -- internal signals; unused externally, retained to avoid
+                -- breaking declarations elsewhere.)
+                if v_in_act then de_o_int <= '1'; else de_o_int <= '0'; end if;
+                if cnt_x_o = to_integer(dst_w) then hs_o_int <= '1'; else hs_o_int <= '0'; end if;
                 if cnt_y_o = to_integer(dst_h) and cnt_x_o = 0 then
                     vs_o_int <= '1';
                 elsif cnt_y_o = to_integer(dst_h) + 1 and cnt_x_o = 0 then
                     vs_o_int <= '0';
                 end if;
 
-                -- ---- Sampling: identity if warp_en=0, warped otherwise ----
-                if v_in_act then
-                    if warp_en = '1' then
-                        v_dst_cx := to_integer(dst_w) / 2;
-                        v_dst_cy := to_integer(dst_h) / 2;
-                        v_dx := cnt_x_o - v_dst_cx;
-                        v_dy := cnt_y_o - v_dst_cy;
-                        v_dx2 := v_dx * v_dx;
-                        v_dy2 := v_dy * v_dy;
-                        v_r2 := LUT_AX2_Q24 * v_dx2 + LUT_AY2_Q24 * v_dy2;
-                        if v_r2 < 0 then v_r2 := 0; end if;
-                        v_m_raw    := warp_m_lookup(to_unsigned(v_r2, 32));
-                        v_m_scaled := scale_m_by_curv(v_m_raw, curvature_k);
-                        v_sxq15 := v_dst_cx * 32768
-                                   + v_dx * to_integer(v_m_scaled);
-                        v_syq15 := v_dst_cy * 32768
-                                   + v_dy * to_integer(v_m_scaled);
-                        v_sxi := v_sxq15 / 32768;
-                        v_syi := v_syq15 / 32768;
-                        if v_sxi < 0 then
-                            v_sxi := 0;
-                        elsif v_sxi >= to_integer(dst_w) then
-                            v_sxi := to_integer(dst_w) - 1;
-                        end if;
-                        if v_syi < 0 then
-                            v_syi := 0;
-                        elsif v_syi >= to_integer(dst_h) then
-                            v_syi := to_integer(dst_h) - 1;
-                        end if;
-                        v_src_x := v_sxi;
-                        v_src_y := v_syi;
-                    else
-                        v_src_x := cnt_x_o;
-                        v_src_y := cnt_y_o;
-                    end if;
-                else
-                    v_src_x := 0;
-                    v_src_y := 0;
-                end if;
-                src_x_now <= v_src_x;
-                src_y_now <= v_src_y;
+                -- ====================================================
+                -- WARP PIPELINE
+                -- ====================================================
 
-                -- Read address: read from the OPPOSITE bank from the
-                -- writer (read drained = previous frame's writes).
+                -- Side data shifts through every cycle.
+                for k in 2 to N_WARP_STAGES loop
+                    side_pipe(k) <= side_pipe(k - 1);
+                end loop;
+
+                -- Stage 1 entry: register current cycle's raster/sync state.
+                side_pipe(1).cnt_x_o  <= cnt_x_o;
+                side_pipe(1).cnt_y_o  <= cnt_y_o;
+                side_pipe(1).dx       <= to_signed(v_dx_int, 16);
+                side_pipe(1).dy       <= to_signed(v_dy_int, 16);
+                if v_in_act then
+                    side_pipe(1).de       <= '1';
+                    side_pipe(1).v_in_act <= '1';
+                else
+                    side_pipe(1).de       <= '0';
+                    side_pipe(1).v_in_act <= '0';
+                end if;
+                if cnt_x_o = to_integer(dst_w) then
+                    side_pipe(1).hs <= '1';
+                else
+                    side_pipe(1).hs <= '0';
+                end if;
+                if cnt_y_o = to_integer(dst_h) and cnt_x_o = 0 then
+                    side_pipe(1).vs <= '1';
+                else
+                    side_pipe(1).vs <= '0';
+                end if;
+                side_pipe(1).warp_en <= warp_en;
+                side_pipe(1).k       <= curvature_k;
+
+                -- Stage 2: parallel multipliers for dx², dy².
+                -- Resize narrows back to s2_*'length=27 (signed(26:0)).
+                s2_dx2 <= resize(side_pipe(1).dx * side_pipe(1).dx, s2_dx2'length);
+                s2_dy2 <= resize(side_pipe(1).dy * side_pipe(1).dy, s2_dy2'length);
+
+                -- Stage 3: AX2·dx², AY2·dy². Narrowed s2_* + narrow AX2
+                -- (≤508) keeps the product inside a single 27×27 DSP
+                -- block, avoiding the multi-DSP carry chain that
+                -- previously cost ~3 ns.
+                s3_ax2dx2 <= resize(to_signed(LUT_AX2_Q24, 11) * s2_dx2, s3_ax2dx2'length);
+                s3_ay2dy2 <= resize(to_signed(LUT_AY2_Q24, 11) * s2_dy2, s3_ay2dy2'length);
+
+                -- Stage 4: sum into r².
+                s4_r2 <= resize(s3_ax2dx2, s4_r2'length)
+                       + resize(s3_ay2dy2, s4_r2'length);
+
+                -- Stage 5: extract idx + frac from r²; LUT read.
+                -- Saturate to 2²⁴ - 1 if r² would overflow the LUT range.
+                if s4_r2 < 0 then
+                    v_idx  := 0;
+                    v_frac := (others => '0');
+                elsif s4_r2 >= to_signed(2**24, s4_r2'length) then
+                    v_idx  := 255;
+                    v_frac := (others => '1');
+                else
+                    v_idx  := to_integer(unsigned(s4_r2(23 downto 16)));
+                    v_frac := unsigned(s4_r2(15 downto 8));
+                end if;
+                s5_m_lo <= WARP_LUT(v_idx);
+                s5_m_hi <= WARP_LUT(v_idx + 1);
+                s5_frac <= v_frac;
+
+                -- Stage 5b: buffer ROM outputs through a normal FF so
+                -- the sub in stage 5c starts from a register with
+                -- standard clock-to-Q instead of altsyncram's ~5 ns.
+                s5b_m_lo <= s5_m_lo;
+                s5b_m_hi <= s5_m_hi;
+                s5b_frac <= s5_frac;
+
+                -- Stage 5c: separate the m_diff sub from the mul (which
+                -- now lives in stage 6 alone). Combining them put the
+                -- path ~2 ns over budget at clk_hdmi.
+                s5c_m_diff <= signed('0' & std_logic_vector(s5b_m_hi))
+                            - signed('0' & std_logic_vector(s5b_m_lo));
+                s5c_m_lo   <= s5b_m_lo;
+                s5c_frac   <= s5b_frac;
+
+                -- Stage 6: m_diff * frac; carry m_lo.
+                s6_m_diff_frac <= resize(
+                    s5c_m_diff * signed('0' & std_logic_vector(s5c_frac)),
+                    s6_m_diff_frac'length);
+                s6_m_lo <= s5c_m_lo;
+
+                -- Stage 7: m_raw = m_lo + (prod >> 8).
+                s7_m_raw <= s6_m_lo + unsigned(s6_m_diff_frac(23 downto 8));
+
+                -- Stage 7b: m_centered = m_raw - 32768 (sub only).
+                s7b_m_centered <= resize(
+                    signed('0' & std_logic_vector(s7_m_raw)) - to_signed(32768, 17),
+                    s7b_m_centered'length);
+
+                -- Stage 8: m_scaled_pre = m_centered * K.
+                -- side_pipe index +3 vs the non-buffered version since
+                -- 5b, 5c, and 7b added three cycles of pipeline depth.
+                s8_m_scaled_pre <= resize(
+                    s7b_m_centered * signed('0' & std_logic_vector(side_pipe(10).k)),
+                    s8_m_scaled_pre'length);
+
+                -- Stage 9: clamp(32768 + m_scaled_pre/2).
+                v_m_acc := to_integer(s8_m_scaled_pre) / 2 + 32768;
+                if v_m_acc < 0 then
+                    s9_m_scaled <= to_unsigned(0, 16);
+                elsif v_m_acc > 65535 then
+                    s9_m_scaled <= to_unsigned(65535, 16);
+                else
+                    s9_m_scaled <= to_unsigned(v_m_acc, 16);
+                end if;
+
+                -- Stage 10: dx·M_scaled, dy·M_scaled.
+                -- signed(15:0) * signed(16:0) = signed(33:0); explicit
+                -- resize down to s10_dx_m'length=32 since the realistic
+                -- max under any sane dst dim fits comfortably.
+                -- side_pipe index +3 from non-buffered version.
+                s10_dx_m <= resize(side_pipe(12).dx * signed('0' & std_logic_vector(s9_m_scaled)), s10_dx_m'length);
+                s10_dy_m <= resize(side_pipe(12).dy * signed('0' & std_logic_vector(s9_m_scaled)), s10_dy_m'length);
+
+                -- Stage 10b: register src_q15 = (DST_C << 15) + dx·M
+                -- so stage 11 only has shift + clamp + mux work.
+                s10b_src_x_q15 <= to_signed(v_dst_cx * 32768, s10b_src_x_q15'length) + s10_dx_m;
+                s10b_src_y_q15 <= to_signed(v_dst_cy * 32768, s10b_src_y_q15'length) + s10_dy_m;
+
+                -- Stage 11: shift + clamp + warp_en mux.
+                v_src_x_q15 := to_integer(s10b_src_x_q15);
+                v_src_y_q15 := to_integer(s10b_src_y_q15);
+                v_src_x_pre := v_src_x_q15 / 32768;
+                v_src_y_pre := v_src_y_q15 / 32768;
+                if v_src_x_pre < 0 then
+                    v_src_x_pre := 0;
+                elsif v_src_x_pre >= to_integer(dst_w) then
+                    v_src_x_pre := to_integer(dst_w) - 1;
+                end if;
+                if v_src_y_pre < 0 then
+                    v_src_y_pre := 0;
+                elsif v_src_y_pre >= to_integer(dst_h) then
+                    v_src_y_pre := to_integer(dst_h) - 1;
+                end if;
+                -- Identity: carry of cnt_x_o/y from 14 cycles ago,
+                -- clamped to active raster when v_in_act was true at
+                -- that cycle.
+                if side_pipe(14).v_in_act = '1' then
+                    v_src_x_id := side_pipe(14).cnt_x_o;
+                    v_src_y_id := side_pipe(14).cnt_y_o;
+                    if v_src_x_id >= to_integer(dst_w) then v_src_x_id := to_integer(dst_w) - 1; end if;
+                    if v_src_y_id >= to_integer(dst_h) then v_src_y_id := to_integer(dst_h) - 1; end if;
+                else
+                    v_src_x_id := 0;
+                    v_src_y_id := 0;
+                end if;
+                if side_pipe(14).warp_en = '1' then
+                    s11_src_x <= v_src_x_pre;
+                    s11_src_y <= v_src_y_pre;
+                else
+                    s11_src_x <= v_src_x_id;
+                    s11_src_y <= v_src_y_id;
+                end if;
+
+                -- ====================================================
+                -- Stage 12: word_addr + lane (registered).
+                -- Bank_sel is stable for entire frames so reading it
+                -- "current" vs side_pipe-aligned is fine in practice.
+                -- ====================================================
                 if bank_sel = '0' then
                     v_base := BANK_B_BASE;
                 else
                     v_base := BANK_A_BASE;
                 end if;
-                v_word := v_base + v_src_y * STRIDE_WORDS
-                          + (v_src_x / C_PIXELS_PER_WORD);
-                rd_word_addr <= v_word;
-                if v_in_act then
-                    read_active <= '1';
-                else
-                    read_active <= '0';
-                end if;
+                s12_word_addr <= v_base + s11_src_y * STRIDE_WORDS
+                                 + (s11_src_x / C_PIXELS_PER_WORD);
+                s12_lane <= s11_src_x mod C_PIXELS_PER_WORD;
+                src_x_now <= s11_src_x;
+                src_y_now <= s11_src_y;
+                read_active <= side_pipe(N_WARP_STAGES - 1).v_in_act;
 
-                -- Shift delay line. pipe(0) gets THIS cycle's sync/lane.
-                -- pipe(0).rd_en is driven from v_in_act directly
-                -- (combinational pre-T) — NOT from read_active (which
-                -- is registered, lagging by 1 cycle). This keeps the
-                -- pipe-tail entry aligned with the registered avl_read
-                -- the mock will see one cycle later.
+                -- ====================================================
+                -- After warp pipeline + word_addr stage: feed pipe(0).
+                -- side_pipe(N_WARP_STAGES) is one cycle further than
+                -- s12_* (extra stage of pipeline for word_addr), so
+                -- the indices align: both reflect cycle T-N_WARP_STAGES.
+                -- ====================================================
+                rd_word_addr <= s12_word_addr;
+
+                -- Shift the DDR3-alignment pipe (unchanged from move 5a).
                 for i in pipe'high downto 1 loop
                     pipe(i) <= pipe(i - 1);
                 end loop;
-                pipe(0).lane  <= v_src_x mod C_PIXELS_PER_WORD;
-                if cnt_x_o = to_integer(dst_w) then
-                    pipe(0).hs <= '1';
-                else
-                    pipe(0).hs <= '0';
-                end if;
-                if cnt_y_o = to_integer(dst_h) and cnt_x_o = 0 then
-                    pipe(0).vs <= '1';
-                else
-                    pipe(0).vs <= '0';
-                end if;
-                if v_in_act then
-                    pipe(0).de <= '1';
-                else
-                    pipe(0).de <= '0';
-                end if;
-                if v_in_act and (wr_pending = '0') then
+                pipe(0).lane <= s12_lane;
+                pipe(0).hs   <= side_pipe(N_WARP_STAGES).hs;
+                pipe(0).vs   <= side_pipe(N_WARP_STAGES).vs;
+                pipe(0).de   <= side_pipe(N_WARP_STAGES).de;
+                if side_pipe(N_WARP_STAGES).v_in_act = '1' and (wr_pending = '0') then
                     pipe(0).rd_en <= '1';
                     read_reg      <= '1';
                 else
