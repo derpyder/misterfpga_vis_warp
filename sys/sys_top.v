@@ -1265,8 +1265,49 @@ cyclonev_hps_interface_peripheral_i2c hdmi_i2c
 		.de_out(hdmi_de_osd)
 	);
 
+	// ====== vis_warp instance @ SITE A (post-osd, clk_hdmi domain) ======
+	// Barrel-distorts the fully post-processed (ascal -> shadowmask ->
+	// osd) image. Source side: hdmi_data_osd / hdmi_*_osd. Sink side
+	// drops into csync_hdmi (below) and the HDMI direct-video mux at
+	// ~line 1385. See pacman-vis/NOTES-vis-warp-insertion-point-2026-05-26.md
+	// for the architectural rationale (site A vs B vs C).
+	wire [23:0] hdmi_data_warp;
+	wire        hdmi_hs_warp, hdmi_vs_warp, hdmi_de_warp;
+	wire        hdmi_ce_warp;   // unused at this layer; clk_hdmi runs every cycle
+
+	vis_warp HDMI_vis_warp
+	(
+		.clk_sys     (clk_sys),
+		.clk_in      (clk_hdmi),
+		.clk_out     (clk_hdmi),
+		.cmd_wr      (vis_warp_cmd_wr),
+		.cmd_in      (vis_warp_cmd_data),
+		.ce_pix_in   (1'b1),
+		.din         (hdmi_data_osd),
+		.hs_in       (hdmi_hs_osd),
+		.vs_in       (hdmi_vs_osd),
+		.de_in       (hdmi_de_osd),
+		.ce_pix_out  (hdmi_ce_warp),
+		.dout        (hdmi_data_warp),
+		.hs_out      (hdmi_hs_warp),
+		.vs_out      (hdmi_vs_warp),
+		.de_out      (hdmi_de_warp),
+		.display_w   (WIDTH),
+		.display_h   (HEIGHT),
+		.fb_en       (FB_EN),
+		.avl_address       (vbuf_vw_address),
+		.avl_burstcount    (vbuf_vw_burstcount),
+		.avl_writedata     (vbuf_vw_writedata),
+		.avl_byteenable    (vbuf_vw_byteenable),
+		.avl_write         (vbuf_vw_write),
+		.avl_read          (vbuf_vw_read),
+		.avl_readdata      (vbuf_vw_readdata),
+		.avl_readdatavalid (vbuf_vw_readdatavalid),
+		.avl_waitrequest   (vbuf_vw_waitrequest)
+	);
+
 	wire hdmi_cs_osd;
-	csync csync_hdmi(clk_hdmi, hdmi_hs_osd, hdmi_vs_osd, hdmi_cs_osd);
+	csync csync_hdmi(clk_hdmi, hdmi_hs_warp, hdmi_vs_warp, hdmi_cs_osd);
 `endif
 
 reg [23:0] dv_data;
@@ -1379,10 +1420,14 @@ always @(posedge hdmi_tx_clk) begin
 	hdmi_dv_de   <= dv_de;
 	
 `ifndef MISTER_DEBUG_NOHDMI
-	hs <= (~vga_fb & direct_video) ? hdmi_dv_hs   : (direct_video & csync_en) ? hdmi_cs_osd : hdmi_hs_osd;
-	vs <= (~vga_fb & direct_video) ? hdmi_dv_vs   : hdmi_vs_osd;
-	de <= (~vga_fb & direct_video) ? hdmi_dv_de   : hdmi_de_osd;
-	d  <= (~vga_fb & direct_video) ? hdmi_dv_data : hdmi_data_osd;
+	// Non-direct-video branch reads from vis_warp's output (hdmi_*_warp)
+	// at SITE A, downstream of ascal/shadowmask/osd. csync still comes
+	// from hdmi_cs_osd which is now itself derived from hdmi_*_warp via
+	// csync_hdmi (see vis_warp insertion block ~line 1268).
+	hs <= (~vga_fb & direct_video) ? hdmi_dv_hs   : (direct_video & csync_en) ? hdmi_cs_osd : hdmi_hs_warp;
+	vs <= (~vga_fb & direct_video) ? hdmi_dv_vs   : hdmi_vs_warp;
+	de <= (~vga_fb & direct_video) ? hdmi_dv_de   : hdmi_de_warp;
+	d  <= (~vga_fb & direct_video) ? hdmi_dv_data : hdmi_data_warp;
 `else
 	hs <= hdmi_dv_hs;
 	vs <= hdmi_dv_vs;
@@ -1776,71 +1821,26 @@ wire  [6:0] user_out, user_in;
 
 assign clk_ihdmi= clk_vid;
 
-// ====== vis_warp insertion (Phase 2 framework integration) ======
-// Sits between post-scanlines vga_data_sl and ascal's i_r/i_g/i_b inputs.
-// HDMI-path only -- direct-video (analog VGA) tap is taken upstream.
-// Configured via HPS_BUS command 0x45 (UIO_VIS_WARP).
+// ====== vis_warp Phase 2 (warp-as-parent) ======
+// vis_warp now lives at SITE A in the HDMI post-processing chain:
+// between osd hdmi_osd and csync_hdmi (see this file ~line 1266-1269).
+// It runs entirely in the clk_hdmi domain and sees the post-osd image.
+// The vbuf_vw_* (vbuf_svc ch1) and vis_warp_cmd_data/wr declarations
+// stay here for proximity but feed the instance further up.
 //
-// vis_warp (sys/vis_warp.vhd) is now the FRAMEWORK WRAPPER: it decodes
-// Agent C's 4-opcode encoding (flags / curvature / bloom / scanlines)
-// into 6 stable control registers, applies fb_en bypass at the wrapper
-// level (MISTER_FB cores stay invisible), and instantiates
-// vis_warp_v2 (sys/vis_warp_v2.vhd) which is the implementation that
-// will be swapped 1:1 with Agent A's real Phase 2 RTL once stage 4
-// lands (B3 in fpga/pacman-vis/SPEC-phase2-agent-B-framework.md).
-//
-// Today's vis_warp_v2 is a passthrough stand-in with the EXACT port
-// shape of A's wip-stage3c-rescue HEAD, so swapping in the real RTL
-// later is a file copy + sys.qip addition for the v2 packages.
+// As a side-effect of moving vis_warp out of the pre-ascal path,
+// hr_out/hg_out/hb_out/hhs_fix/hvs_fix/hde_emu/ce_hpix revert to the
+// stock MiSTer template wiring (= ascal gets raw emu output directly).
 reg [15:0] vis_warp_cmd_data;
 reg        vis_warp_cmd_wr = 0;
 
-wire [23:0] vw_dout;
-wire        vw_hs, vw_vs, vw_de, vw_ce_pix;
-
-// vis_warp drives the vbuf_svc ch1 slave directly. The stand-in still
-// emits avl_write=0 / avl_read=0 / writedata=0, so vbuf_svc sees no ch1
-// traffic in the wrapper-with-stand-in configuration and behavior is
-// identical to the pre-arbiter wiring. When B3 swaps the stand-in for
-// the real v2 RTL, the same wiring carries actual DDR3 read/write
-// traffic without further sys_top.v changes.
-vis_warp vis_warp_inst (
-	.clk_sys     (clk_sys),
-	.clk_in      (clk_vid),
-	.clk_out     (clk_hdmi),
-	.cmd_wr      (vis_warp_cmd_wr),
-	.cmd_in      (vis_warp_cmd_data),
-	.ce_pix_in   (vga_ce_sl),
-	.din         (vga_data_sl),
-	.hs_in       (vga_hs_sl),
-	.vs_in       (vga_vs_sl),
-	.de_in       (vga_de_sl),
-	.ce_pix_out  (vw_ce_pix),
-	.dout        (vw_dout),
-	.hs_out      (vw_hs),
-	.vs_out      (vw_vs),
-	.de_out      (vw_de),
-	.display_w   (WIDTH),
-	.display_h   (HEIGHT),
-	.fb_en       (FB_EN),
-	.avl_address       (vbuf_vw_address),
-	.avl_burstcount    (vbuf_vw_burstcount),
-	.avl_writedata     (vbuf_vw_writedata),
-	.avl_byteenable    (vbuf_vw_byteenable),
-	.avl_write         (vbuf_vw_write),
-	.avl_read          (vbuf_vw_read),
-	.avl_readdata      (vbuf_vw_readdata),
-	.avl_readdatavalid (vbuf_vw_readdatavalid),
-	.avl_waitrequest   (vbuf_vw_waitrequest)
-);
-
-assign ce_hpix  = vw_ce_pix;
-assign hr_out   = vw_dout[23:16];
-assign hg_out   = vw_dout[15:8];
-assign hb_out   = vw_dout[7:0];
-assign hhs_fix  = vw_hs;
-assign hvs_fix  = vw_vs;
-assign hde_emu  = vw_de;
+assign ce_hpix  = ce_pix;
+assign hr_out   = r_out;
+assign hg_out   = g_out;
+assign hb_out   = b_out;
+assign hhs_fix  = hs_fix;
+assign hvs_fix  = vs_fix;
+assign hde_emu  = de_emu;
 
 wire uart_dtr;
 wire uart_dsr;
