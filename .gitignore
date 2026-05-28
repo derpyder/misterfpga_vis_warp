@@ -41,3 +41,4 @@ c5_pin_model_dump.txt
 work-vis/
 work-ghdl/
 sys/work-ghdl/
+build-*.log

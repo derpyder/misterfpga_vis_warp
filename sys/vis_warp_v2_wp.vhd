@@ -16,13 +16,24 @@
 -- Architecture:
 --   - Write side: incoming pixels (din + ce_pix_in + de_in) get packed
 --     4-at-a-time into 128-bit words and written to DDR3.
---   - Read side: internal raster counter (cnt_x_o, cnt_y_o) walks
---     dst_w x dst_h, advancing 1 pixel per clock. Output hs/vs/de
---     regenerated from this counter (NOT delayed from input). For each
---     output pixel, src coord = identity (move 5b makes it warped).
+--   - Read side: cnt_x_o / cnt_y_o track INPUT pixel position, driven
+--     from hs_in/vs_in/de_in edges (NOT a free-running counter). They
+--     feed the warp math (dx = cnt_x - DST_CX, etc.) and the identity
+--     src-coord path. For each input pixel, src coord = identity if
+--     warp_en=0, else the barrel-warped coord from the v2 pipeline.
 --     A delay-line shift register carries (lane, hs, vs, de) so when
 --     the read data arrives we know which 24-bit pixel lane to extract
 --     and which sync state to emit alongside it.
+--   - Output sync (hs_out/vs_out/de_out) is delay-pass-through of
+--     input sync. side_pipe(1).hs/vs/de are loaded from hs_in/vs_in/
+--     de_in each cycle; they propagate through side_pipe + pipe to the
+--     emitter unchanged. This means the upstream raster's REAL HDMI
+--     blanking widths (~280 cycles HBLANK, ~45 lines VBLANK at 1080p)
+--     are preserved end-to-end. The legacy HBLANK/VBLANK generics are
+--     unused now; kept on the entity for wrapper-contract stability.
+--     [bug-fix 2026-05-27: prior version regenerated sync from cnt_x_o
+--     positions with hardcoded HBLANK=16/VBLANK=4 — totally wrong for
+--     real HDMI, monitor refused to lock on hardware.]
 --   - Bank ping-pong: vs_rising flips bank_sel. Writer fills bank_sel;
 --     reader reads from the OTHER bank. Net latency: 1 frame.
 --   - Single Avalon master internally: writes have priority. When a
@@ -119,12 +130,21 @@ architecture rtl of vis_warp_v2_wp is
     signal wr_addr_word : integer := 0;
     signal wr_data      : std_logic_vector(127 downto 0) := (others => '0');
 
+    -- ---- Input-sync edge detect ----
+    -- hs_in_d / de_in_d are 1-cycle delayed versions of the input sync.
+    -- de_in falling edge = end of an active row -> advance cnt_y_o and
+    -- reset cnt_x_o. (hs_in_d kept around in case future code needs
+    -- hs_in rising for guidance; not strictly used yet.)
+    signal hs_in_d      : std_logic := '0';
+    signal de_in_d      : std_logic := '0';
+    signal de_in_falling : std_logic;
+
     -- ---- Read side raster counter ----
+    -- cnt_x_o / cnt_y_o track current INPUT pixel position. Driven from
+    -- input sync, NOT a free-running counter. Feeds the warp math
+    -- (dx = cnt_x_o - DST_CX, etc.) and the identity src lookup.
     signal cnt_x_o      : integer := 0;
     signal cnt_y_o      : integer := 0;
-    signal de_o_int     : std_logic := '0';
-    signal hs_o_int     : std_logic := '0';
-    signal vs_o_int     : std_logic := '0';
 
     -- Source coord for the read being issued THIS cycle
     signal src_x_now    : integer := 0;
@@ -178,7 +198,7 @@ architecture rtl of vis_warp_v2_wp is
     constant N_WARP_STAGES : integer := 16;
 
     type warp_side_t is record
-        cnt_x_o  : integer range 0 to MAX_DST_W + 4095;  -- room for HBLANK
+        cnt_x_o  : integer range 0 to MAX_DST_W + 4095;  -- generous headroom
         cnt_y_o  : integer range 0 to MAX_DST_H + 4095;
         dx       : signed(15 downto 0);
         dy       : signed(15 downto 0);
@@ -314,7 +334,8 @@ begin
             end if;
         end if;
     end process;
-    vs_rising <= '1' when (vs_in = '1' and vs_in_d = '0') else '0';
+    vs_rising     <= '1' when (vs_in = '1' and vs_in_d = '0') else '0';
+    de_in_falling <= '1' when (de_in = '0' and de_in_d = '1') else '0';
 
     -- ============================================================
     -- Write side: pack 4 pixels -> 128-bit word -> DDR3 write.
@@ -410,8 +431,6 @@ begin
     -- After S12: pipe(0) registered from side_pipe(N_WARP_STAGES) + s12_*.
     -- ============================================================
     process(clk)
-        variable v_total_x : integer;
-        variable v_total_y : integer;
         variable v_in_act  : boolean;
         variable v_dst_cx  : integer;
         variable v_dst_cy  : integer;
@@ -442,9 +461,8 @@ begin
             if reset = '1' then
                 cnt_x_o   <= 0;
                 cnt_y_o   <= 0;
-                de_o_int  <= '0';
-                hs_o_int  <= '0';
-                vs_o_int  <= '0';
+                hs_in_d   <= '0';
+                de_in_d   <= '0';
                 pipe      <= (others => PIPE_ENTRY_ZERO);
                 src_x_now <= 0;
                 src_y_now <= 0;
@@ -471,38 +489,36 @@ begin
                 s11_src_x <= 0; s11_src_y <= 0;
                 s12_word_addr <= 0; s12_lane <= 0;
             else
-                v_total_x := to_integer(dst_w) + HBLANK;
-                v_total_y := to_integer(dst_h) + VBLANK;
+                -- ---- Input-sync edge registers ----
+                hs_in_d <= hs_in;
+                de_in_d <= de_in;
 
-                if cnt_x_o = v_total_x - 1 then
+                -- ---- Input-driven raster counter ----
+                -- vs rising  -> reset cnt_y_o (and cnt_x_o defensively).
+                -- de falling -> end of an active row: cnt_x_o<=0; cnt_y_o++.
+                -- de high    -> active pixel: cnt_x_o++.
+                -- During hblank/vblank (de='0', no falling edge this cycle)
+                -- both counters hold. cnt_x_o always reflects the position
+                -- of the pixel being registered into side_pipe(1) THIS cycle.
+                if vs_rising = '1' then
                     cnt_x_o <= 0;
-                    if cnt_y_o = v_total_y - 1 then
-                        cnt_y_o <= 0;
-                    else
-                        cnt_y_o <= cnt_y_o + 1;
-                    end if;
-                else
+                    cnt_y_o <= 0;
+                elsif de_in_falling = '1' then
+                    cnt_x_o <= 0;
+                    cnt_y_o <= cnt_y_o + 1;
+                elsif de_in = '1' then
                     cnt_x_o <= cnt_x_o + 1;
                 end if;
 
                 -- ---- Combinational at stage 1 input ----
-                v_in_act := (cnt_x_o < to_integer(dst_w))
-                            and (cnt_y_o < to_integer(dst_h));
+                -- v_in_act now == de_in: an active input pixel is being
+                -- registered into the pipeline. Read issuance downstream
+                -- still gates on side_pipe(N).v_in_act (= de_in delayed).
+                v_in_act := (de_in = '1');
                 v_dst_cx := to_integer(dst_w) / 2;
                 v_dst_cy := to_integer(dst_h) / 2;
                 v_dx_int := cnt_x_o - v_dst_cx;
                 v_dy_int := cnt_y_o - v_dst_cy;
-
-                -- (Legacy de_o_int/hs_o_int/vs_o_int kept as registered
-                -- internal signals; unused externally, retained to avoid
-                -- breaking declarations elsewhere.)
-                if v_in_act then de_o_int <= '1'; else de_o_int <= '0'; end if;
-                if cnt_x_o = to_integer(dst_w) then hs_o_int <= '1'; else hs_o_int <= '0'; end if;
-                if cnt_y_o = to_integer(dst_h) and cnt_x_o = 0 then
-                    vs_o_int <= '1';
-                elsif cnt_y_o = to_integer(dst_h) + 1 and cnt_x_o = 0 then
-                    vs_o_int <= '0';
-                end if;
 
                 -- ====================================================
                 -- WARP PIPELINE
@@ -513,30 +529,22 @@ begin
                     side_pipe(k) <= side_pipe(k - 1);
                 end loop;
 
-                -- Stage 1 entry: register current cycle's raster/sync state.
+                -- Stage 1 entry: register current cycle's raster + sync
+                -- state. hs/vs/de are pass-through from input — they
+                -- propagate through side_pipe + pipe to hs_out/vs_out/
+                -- de_out unchanged, preserving the upstream HDMI raster's
+                -- real blanking widths. v_in_act mirrors de_in for read
+                -- gating downstream.
                 side_pipe(1).cnt_x_o  <= cnt_x_o;
                 side_pipe(1).cnt_y_o  <= cnt_y_o;
                 side_pipe(1).dx       <= to_signed(v_dx_int, 16);
                 side_pipe(1).dy       <= to_signed(v_dy_int, 16);
-                if v_in_act then
-                    side_pipe(1).de       <= '1';
-                    side_pipe(1).v_in_act <= '1';
-                else
-                    side_pipe(1).de       <= '0';
-                    side_pipe(1).v_in_act <= '0';
-                end if;
-                if cnt_x_o = to_integer(dst_w) then
-                    side_pipe(1).hs <= '1';
-                else
-                    side_pipe(1).hs <= '0';
-                end if;
-                if cnt_y_o = to_integer(dst_h) and cnt_x_o = 0 then
-                    side_pipe(1).vs <= '1';
-                else
-                    side_pipe(1).vs <= '0';
-                end if;
-                side_pipe(1).warp_en <= warp_en;
-                side_pipe(1).k       <= curvature_k;
+                side_pipe(1).de       <= de_in;
+                side_pipe(1).hs       <= hs_in;
+                side_pipe(1).vs       <= vs_in;
+                side_pipe(1).v_in_act <= de_in;
+                side_pipe(1).warp_en  <= warp_en;
+                side_pipe(1).k        <= curvature_k;
 
                 -- Stage 2: parallel multipliers for dx², dy².
                 -- Resize narrows back to s2_*'length=27 (signed(26:0)).
