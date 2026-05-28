@@ -1,7 +1,47 @@
 # B4 — Async FIFOs for video ingress/egress CDC
 
-Status: DEFERRED. Not started in the B3 commit batch; queued for the
-hardware-host milestone alongside B5 Quartus synthesis.
+Status (2026-05-28): **Phase 1 minimal LANDED**, Phase 2 full FIFOs
+DEFERRED. See SPEC-vis_warp-v3.md.
+
+## Phase 1 (DONE, 2026-05-28)
+
+2-flop synchronizers for the three clk_sys → clk_in control signals,
+in-line in `sys/vis_warp.vhd`:
+
+  * `reg_enable` → `reg_enable_s1` → `reg_enable_s2` (level sync, 2 flops)
+  * `reg_curvature` → `_s1` → `_s2` (3-bit level sync, 2 flops per bit)
+  * `reg_reset_int` (1-cycle pulse on clk_sys) → toggled at source,
+    3-flop sync on clk_in, XOR-edge-detected back into 1-cycle clk_in
+    pulse. Cannot be lost regardless of clk_sys vs clk_in ratio.
+
+Synchronizer signals carry `preserve` attribute so Quartus doesn't
+optimize the chain.
+
+Justification for the level signals not needing toggle-handshake: they
+are slowly-changing user config. A 1-cycle transient mid-update is
+visually irrelevant — at most one frame uses a slightly-wrong curvature
+between user OSD interactions. Multi-bit gray coding would be overkill.
+
+## Why Phase 2 (full async dcfifo) is deferred
+
+At site C, `clk_in = clk_out = clk_ihdmi` (ascal's input clock). The
+egress crossing collapses to identity — no FIFO needed on the data path.
+The only real CDC is the config-register read into the data-path clock
+domain, which Phase 1 handles. The pixel data itself never crosses a
+domain inside this wrapper.
+
+If a future revision moves vis_warp to a different slot (e.g., between
+ascal and shadowmask on `clk_hdmi`), Phase 2 will be needed because
+clk_in (= clk_video) and clk_out (= clk_hdmi) would diverge.
+
+## Open question: SDC constraints
+
+Phase 1's synchronizer chains may require explicit `set_false_path`
+entries in an SDC file to avoid Quartus timing warnings about
+unconstrained CDC paths. **Do not edit `Template.sdc` directly** — it's
+upstream-tracked. If needed, add a separate `sys/vis_warp.sdc` and
+reference from `sys.qip`. Defer until Phase 3 build (SPEC task #7)
+reports actual warnings.
 
 ## Why this is real work, not a one-liner
 
@@ -27,6 +67,11 @@ clock anyway) and the wrapper smoke TB but is **unsafe on real HW**:
   * `fb_en` is a clk_sys config bit feeding the same mux; glitch-free in
     practice because it changes per-MISTER_FB-frame, but still
     technically unsynchronized.
+
+## Original B4 plan (Phase 2 reference, deferred)
+
+The rest of this document is the original full-FIFO plan from
+2026-05-27. Kept as reference for if/when Phase 2 becomes needed.
 
 ## What B4 needs to deliver
 

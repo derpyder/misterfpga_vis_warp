@@ -42,3 +42,5 @@ work-vis/
 work-ghdl/
 sys/work-ghdl/
 build-*.log
+sta_query.tcl
+worst_paths.txt

@@ -501,7 +501,7 @@ always@(posedge clk_sys) begin
 			end
 `ifndef MISTER_DEBUG_NOHDMI
 			if(cmd == 'h3E) {shadowmask_wr,shadowmask_data} <= {1'b1, io_din};
-			if(cmd == 'h45) {vis_warp_cmd_wr,vis_warp_cmd_data} <= {1'b1, io_din};   // VIS_WARP config (Phase 2)
+			if(cmd == 'h45) {vis_warp_cmd_wr,vis_warp_cmd_data} <= {1'b1, io_din};   // VIS_WARP config (SITE C)
 			if(cmd == 'h40) begin
 				case(cnt[3:0])
 					0: io_dout_sys <= {arxy, arx};
@@ -695,10 +695,8 @@ wire clk_pal = clk_audio;
 
 
 // ---- vbuf channel ----
-// vbuf_* (master side) connects sysmem.vbuf to the vbuf_svc arbiter.
-// vbuf_ascal_* (ch0 slave) is ascal's view of the shared port.
-// vbuf_vw_* (ch1 slave) is vis_warp's view; declared near the vis_warp
-// instance below.
+// Direct connection from sysmem.vbuf to ascal.avl_* (matches upstream).
+// vis_warp at site C uses M9K ping-pong, not DDR3 — no arbiter needed.
 wire  [27:0] vbuf_address;
 wire   [7:0] vbuf_burstcount;
 wire         vbuf_waitrequest;
@@ -708,65 +706,6 @@ wire         vbuf_read;
 wire [127:0] vbuf_writedata;
 wire  [15:0] vbuf_byteenable;
 wire         vbuf_write;
-
-// ch0 slave -- ascal side
-wire  [27:0] vbuf_ascal_address;
-wire   [7:0] vbuf_ascal_burstcount;
-wire         vbuf_ascal_waitrequest;
-wire [127:0] vbuf_ascal_readdata;
-wire         vbuf_ascal_readdatavalid;
-wire         vbuf_ascal_read;
-wire [127:0] vbuf_ascal_writedata;
-wire  [15:0] vbuf_ascal_byteenable;
-wire         vbuf_ascal_write;
-
-// ch1 slave -- vis_warp side (driven from vw_avl_* declared near the
-// vis_warp instance later in this file)
-wire  [27:0] vbuf_vw_address;
-wire   [7:0] vbuf_vw_burstcount;
-wire         vbuf_vw_waitrequest;
-wire [127:0] vbuf_vw_readdata;
-wire         vbuf_vw_readdatavalid;
-wire         vbuf_vw_read;
-wire [127:0] vbuf_vw_writedata;
-wire  [15:0] vbuf_vw_byteenable;
-wire         vbuf_vw_write;
-
-vbuf_svc vbuf_svc_inst
-(
-    .clk                 (clk_100m),
-
-    .ram_waitrequest     (),                          // unused output
-    .ram_burstcount      (vbuf_burstcount),
-    .ram_addr            (vbuf_address),
-    .ram_writedata       (vbuf_writedata),
-    .ram_byteenable      (vbuf_byteenable),
-    .ram_read            (vbuf_read),
-    .ram_write           (vbuf_write),
-    .ram_waitrequest_in  (vbuf_waitrequest),
-    .ram_readdata        (vbuf_readdata),
-    .ram_readdatavalid   (vbuf_readdatavalid),
-
-    .ch0_address         (vbuf_ascal_address),
-    .ch0_burstcount      (vbuf_ascal_burstcount),
-    .ch0_writedata       (vbuf_ascal_writedata),
-    .ch0_byteenable      (vbuf_ascal_byteenable),
-    .ch0_read            (vbuf_ascal_read),
-    .ch0_write           (vbuf_ascal_write),
-    .ch0_readdata        (vbuf_ascal_readdata),
-    .ch0_readdatavalid   (vbuf_ascal_readdatavalid),
-    .ch0_waitrequest     (vbuf_ascal_waitrequest),
-
-    .ch1_address         (vbuf_vw_address),
-    .ch1_burstcount      (vbuf_vw_burstcount),
-    .ch1_writedata       (vbuf_vw_writedata),
-    .ch1_byteenable      (vbuf_vw_byteenable),
-    .ch1_read            (vbuf_vw_read),
-    .ch1_write           (vbuf_vw_write),
-    .ch1_readdata        (vbuf_vw_readdata),
-    .ch1_readdatavalid   (vbuf_vw_readdatavalid),
-    .ch1_waitrequest     (vbuf_vw_waitrequest)
-);
 
 wire  [23:0] hdmi_data;
 wire         hdmi_vs, hdmi_hs, hdmi_de, hdmi_vbl, hdmi_brd;
@@ -883,15 +822,15 @@ wire         bob_deint;
 		.o_fb_stride      (FB_STRIDE),
 
 		.avl_clk          (clk_100m),
-		.avl_waitrequest  (vbuf_ascal_waitrequest),
-		.avl_readdata     (vbuf_ascal_readdata),
-		.avl_readdatavalid(vbuf_ascal_readdatavalid),
-		.avl_burstcount   (vbuf_ascal_burstcount),
-		.avl_writedata    (vbuf_ascal_writedata),
-		.avl_address      (vbuf_ascal_address),
-		.avl_write        (vbuf_ascal_write),
-		.avl_read         (vbuf_ascal_read),
-		.avl_byteenable   (vbuf_ascal_byteenable)
+		.avl_waitrequest  (vbuf_waitrequest),
+		.avl_readdata     (vbuf_readdata),
+		.avl_readdatavalid(vbuf_readdatavalid),
+		.avl_burstcount   (vbuf_burstcount),
+		.avl_writedata    (vbuf_writedata),
+		.avl_address      (vbuf_address),
+		.avl_write        (vbuf_write),
+		.avl_read         (vbuf_read),
+		.avl_byteenable   (vbuf_byteenable)
 	);
 `endif
 
@@ -1265,49 +1204,11 @@ cyclonev_hps_interface_peripheral_i2c hdmi_i2c
 		.de_out(hdmi_de_osd)
 	);
 
-	// ====== vis_warp instance @ SITE A (post-osd, clk_hdmi domain) ======
-	// Barrel-distorts the fully post-processed (ascal -> shadowmask ->
-	// osd) image. Source side: hdmi_data_osd / hdmi_*_osd. Sink side
-	// drops into csync_hdmi (below) and the HDMI direct-video mux at
-	// ~line 1385. See pacman-vis/NOTES-vis-warp-insertion-point-2026-05-26.md
-	// for the architectural rationale (site A vs B vs C).
-	wire [23:0] hdmi_data_warp;
-	wire        hdmi_hs_warp, hdmi_vs_warp, hdmi_de_warp;
-	wire        hdmi_ce_warp;   // unused at this layer; clk_hdmi runs every cycle
-
-	vis_warp HDMI_vis_warp
-	(
-		.clk_sys     (clk_sys),
-		.clk_in      (clk_hdmi),
-		.clk_out     (clk_hdmi),
-		.cmd_wr      (vis_warp_cmd_wr),
-		.cmd_in      (vis_warp_cmd_data),
-		.ce_pix_in   (1'b1),
-		.din         (hdmi_data_osd),
-		.hs_in       (hdmi_hs_osd),
-		.vs_in       (hdmi_vs_osd),
-		.de_in       (hdmi_de_osd),
-		.ce_pix_out  (hdmi_ce_warp),
-		.dout        (hdmi_data_warp),
-		.hs_out      (hdmi_hs_warp),
-		.vs_out      (hdmi_vs_warp),
-		.de_out      (hdmi_de_warp),
-		.display_w   (WIDTH),
-		.display_h   (HEIGHT),
-		.fb_en       (FB_EN),
-		.avl_address       (vbuf_vw_address),
-		.avl_burstcount    (vbuf_vw_burstcount),
-		.avl_writedata     (vbuf_vw_writedata),
-		.avl_byteenable    (vbuf_vw_byteenable),
-		.avl_write         (vbuf_vw_write),
-		.avl_read          (vbuf_vw_read),
-		.avl_readdata      (vbuf_vw_readdata),
-		.avl_readdatavalid (vbuf_vw_readdatavalid),
-		.avl_waitrequest   (vbuf_vw_waitrequest)
-	);
-
+	// vis_warp lives at SITE C (pre-ascal, source-res, clk_video) — see
+	// the trailing block near the file's end. There is no post-osd
+	// vis_warp instance; this block matches upstream Template_MiSTer.
 	wire hdmi_cs_osd;
-	csync csync_hdmi(clk_hdmi, hdmi_hs_warp, hdmi_vs_warp, hdmi_cs_osd);
+	csync csync_hdmi(clk_hdmi, hdmi_hs_osd, hdmi_vs_osd, hdmi_cs_osd);
 `endif
 
 reg [23:0] dv_data;
@@ -1420,14 +1321,10 @@ always @(posedge hdmi_tx_clk) begin
 	hdmi_dv_de   <= dv_de;
 	
 `ifndef MISTER_DEBUG_NOHDMI
-	// Non-direct-video branch reads from vis_warp's output (hdmi_*_warp)
-	// at SITE A, downstream of ascal/shadowmask/osd. csync still comes
-	// from hdmi_cs_osd which is now itself derived from hdmi_*_warp via
-	// csync_hdmi (see vis_warp insertion block ~line 1268).
-	hs <= (~vga_fb & direct_video) ? hdmi_dv_hs   : (direct_video & csync_en) ? hdmi_cs_osd : hdmi_hs_warp;
-	vs <= (~vga_fb & direct_video) ? hdmi_dv_vs   : hdmi_vs_warp;
-	de <= (~vga_fb & direct_video) ? hdmi_dv_de   : hdmi_de_warp;
-	d  <= (~vga_fb & direct_video) ? hdmi_dv_data : hdmi_data_warp;
+	hs <= (~vga_fb & direct_video) ? hdmi_dv_hs   : (direct_video & csync_en) ? hdmi_cs_osd : hdmi_hs_osd;
+	vs <= (~vga_fb & direct_video) ? hdmi_dv_vs   : hdmi_vs_osd;
+	de <= (~vga_fb & direct_video) ? hdmi_dv_de   : hdmi_de_osd;
+	d  <= (~vga_fb & direct_video) ? hdmi_dv_data : hdmi_data_osd;
 `else
 	hs <= hdmi_dv_hs;
 	vs <= hdmi_dv_vs;
@@ -1821,19 +1718,58 @@ wire  [6:0] user_out, user_in;
 
 assign clk_ihdmi= clk_vid;
 
-// ====== vis_warp Phase 2 (warp-as-parent) ======
-// vis_warp now lives at SITE A in the HDMI post-processing chain:
-// between osd hdmi_osd and csync_hdmi (see this file ~line 1266-1269).
-// It runs entirely in the clk_hdmi domain and sees the post-osd image.
-// The vbuf_vw_* (vbuf_svc ch1) and vis_warp_cmd_data/wr declarations
-// stay here for proximity but feed the instance further up.
+// ====== vis_warp @ SITE C (pre-ascal, source-res, clk_vid domain) ======
+// vis_warp lives between the emu's raw RGB output and ascal's input.
+// Operates at source resolution on clk_vid (= clk_video, the emu pixel
+// clock). Locked architecture per
+// ~/.claude/projects/D--deck/memory/design_vis_warp_constraints.md.
 //
-// As a side-effect of moving vis_warp out of the pre-ascal path,
-// hr_out/hg_out/hb_out/hhs_fix/hvs_fix/hde_emu/ce_hpix revert to the
-// stock MiSTer template wiring (= ascal gets raw emu output directly).
+// Macro-gated: cores opt in via `set_global_assignment -name
+// VERILOG_MACRO "MISTER_WARP=1"` in their .qsf. Default OFF — when the
+// macro is unset, the path collapses to plain assigns (ascal receives
+// raw emu output directly, matching upstream Template_MiSTer behavior).
+//
+// cmd 0x45 decoder above is always-on regardless of MISTER_WARP; the
+// registers are harmless if vis_warp isn't instantiated.
 reg [15:0] vis_warp_cmd_data;
 reg        vis_warp_cmd_wr = 0;
 
+`ifdef MISTER_WARP
+wire [7:0] vw_r, vw_g, vw_b;
+wire       vw_hs, vw_vs, vw_de;
+
+vis_warp u_vis_warp_siteC
+(
+	.clk_sys     (clk_sys),
+	.clk_in      (clk_vid),       // source pixel clock (= clk_video)
+	.clk_out     (clk_vid),       // unused at site C; tied to clk_in
+	.cmd_wr      (vis_warp_cmd_wr),
+	.cmd_in      (vis_warp_cmd_data),
+	.ce_pix_in   (ce_pix),
+	.r_in        (r_out),
+	.g_in        (g_out),
+	.b_in        (b_out),
+	.hs_in       (hs_fix),
+	.vs_in       (vs_fix),
+	.de_in       (de_emu),
+	.ce_pix_out  (),               // unused; ce_hpix is driven from ce_pix
+	.r_out       (vw_r),
+	.g_out       (vw_g),
+	.b_out       (vw_b),
+	.hs_out      (vw_hs),
+	.vs_out      (vw_vs),
+	.de_out      (vw_de)
+);
+
+assign ce_hpix  = ce_pix;
+assign hr_out   = vw_r;
+assign hg_out   = vw_g;
+assign hb_out   = vw_b;
+assign hhs_fix  = vw_hs;
+assign hvs_fix  = vw_vs;
+assign hde_emu  = vw_de;
+`else
+// MISTER_WARP unset: stock pass-through (= upstream Template behavior).
 assign ce_hpix  = ce_pix;
 assign hr_out   = r_out;
 assign hg_out   = g_out;
@@ -1841,6 +1777,7 @@ assign hb_out   = b_out;
 assign hhs_fix  = hs_fix;
 assign hvs_fix  = vs_fix;
 assign hde_emu  = de_emu;
+`endif
 
 wire uart_dtr;
 wire uart_dsr;

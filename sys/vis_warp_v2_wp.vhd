@@ -1,46 +1,42 @@
--- vis_warp_v2_wp -- "warp-as-parent" v2
+-- vis_warp_v2_wp -- "warp-as-parent" v2, site-C edition (2026-05-27 night)
 --
--- Phase 2 architecture-reset (2026-05-26). Implements the new port
--- shape from `NOTES-vis-warp-v2-entity-sketch-2026-05-26.md`:
+-- ARCHITECTURE (post-2026-05-27 final): site C, pre-ascal, source resolution.
+--   See ~/.claude/projects/D--deck/memory/design_vis_warp_constraints.md for
+--   the full design rationale (locked-in, not to be re-litigated).
 --
---   - Lives at site A (post-osd, pre-csync, clk_hdmi domain).
---   - Single clock; CDC FIFOs not needed in the streaming path.
---   - Inputs are HDMI-raster; outputs are HDMI-raster (no upscale).
---   - Runtime controls collapse to warp_en + curvature_k + dst_w/dst_h.
+-- Summary: vis_warp lives BETWEEN the game core's raw pixel output and
+-- ascal's input. Operates at clk_video (game pixel clock), source
+-- resolution (typically <=384 wide for arcade). Captures incoming
+-- pixels into an N=128-line M10K sliding window. For each output pixel,
+-- the warp pipeline produces (src_x, src_y); we read the buffer at that
+-- address (clamping out-of-range src_y to the most recently-captured
+-- line). ascal upscales the warped source frame to whatever HDMI mode
+-- the user has configured, so the bow scales naturally with the
+-- integer scaling factor.
 --
--- MOVE 5a (this revision): DDR3 ping-pong capture/readback with
--- identity sampling. The warp path is structurally present (the
--- read-side address generator can compute warped src coords) but the
--- math is stubbed at identity. Move 5b lights up the warp math.
+-- Port signature has CHANGED from the prior DDR3-based design:
+--   - No more avl_* (no DDR3 access; vbuf belongs to ascal).
+--   - r/g/b separate 8-bit signals (match ascal's i_r/g/b input shape).
+--   - ce_pix in (= pixel-clock enable; pipeline gated on this).
+--   - No more dst_w / dst_h external inputs. Source dims are
+--     auto-detected internally by counting active de_in pulses per line
+--     and active lines per frame, latched on vs_in rising. Default
+--     defaults (288 x 224) cover the first frame before detection.
 --
--- Architecture:
---   - Write side: incoming pixels (din + ce_pix_in + de_in) get packed
---     4-at-a-time into 128-bit words and written to DDR3.
---   - Read side: cnt_x_o / cnt_y_o track INPUT pixel position, driven
---     from hs_in/vs_in/de_in edges (NOT a free-running counter). They
---     feed the warp math (dx = cnt_x - DST_CX, etc.) and the identity
---     src-coord path. For each input pixel, src coord = identity if
---     warp_en=0, else the barrel-warped coord from the v2 pipeline.
---     A delay-line shift register carries (lane, hs, vs, de) so when
---     the read data arrives we know which 24-bit pixel lane to extract
---     and which sync state to emit alongside it.
---   - Output sync (hs_out/vs_out/de_out) is delay-pass-through of
---     input sync. side_pipe(1).hs/vs/de are loaded from hs_in/vs_in/
---     de_in each cycle; they propagate through side_pipe + pipe to the
---     emitter unchanged. This means the upstream raster's REAL HDMI
---     blanking widths (~280 cycles HBLANK, ~45 lines VBLANK at 1080p)
---     are preserved end-to-end. The legacy HBLANK/VBLANK generics are
---     unused now; kept on the entity for wrapper-contract stability.
---     [bug-fix 2026-05-27: prior version regenerated sync from cnt_x_o
---     positions with hardcoded HBLANK=16/VBLANK=4 — totally wrong for
---     real HDMI, monitor refused to lock on hardware.]
---   - Bank ping-pong: vs_rising flips bank_sel. Writer fills bank_sel;
---     reader reads from the OTHER bank. Net latency: 1 frame.
---   - Single Avalon master internally: writes have priority. When a
---     write fires, the read for that cycle is skipped (pipe(0).rd_en=0),
---     so the emitter knows the matching cycle has no valid readdata
---     and emits black instead. Keep ce_pix_in sparse in TBs to bound
---     dropped reads.
+-- Buffer layout: pixel_buf(addr) holds RGB888 packed as 24 bits, where
+--   addr = (cnt_y mod N_LINES) * MAX_SRC_W + cnt_x.
+-- M10K cost at MAX_SRC_W=512, N_LINES=128, RGB888:
+--   65536 entries * 24 bits = 1.57 Mbit ≈ 165 M10K blocks (~30% of 553).
+-- Sync buffer (delayed hs/vs/de pass-through, gated on de_in): 3-bit
+--   parallel buffer of the same depth, ~20 M10K blocks. Total ≈ 33% M10K.
+--
+-- Latency: 16-stage warp math + 1-cycle M10K read = 17 clk_video cycles
+-- per pixel. At typical clk_video ~6 MHz that's ~2.8 us, well under one
+-- scanline. No frame-level lookahead in this v1 — src_y is clamped to
+-- the most-recently-captured line, so the top N_LINES/2 rows of output
+-- have a "weakened" warp where the corner curvature would otherwise
+-- pull from future lines. v2 adds the N/2-line lookahead by delaying
+-- output sync.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -51,53 +47,34 @@ use work.vis_warp_luts_pkg.all;
 
 entity vis_warp_v2_wp is
     generic (
-        MAX_DST_W   : integer := 1920;
-        MAX_DST_H   : integer := 1080;
-        ARX         : integer := 4;
-        ARY         : integer := 3;
-        AW          : integer := 28;
-        DW          : integer := 128;
-        BEW         : integer := 16;
-        BCW         : integer := 8;
-        BANK_A_BASE : integer := 0;
-        BANK_B_BASE : integer := 2_097_152;
-        READ_LAT    : integer := 8;
-        -- Output raster blanking. Defaults match common HDMI rasters
-        -- conservatively; TB or wrapper can shrink for compact sims.
-        HBLANK      : integer := 16;
-        VBLANK      : integer := 4
+        MAX_SRC_W : integer := 512;     -- max source width supported
+        N_LINES   : integer := 128;     -- M10K sliding-window depth
+        ARX       : integer := 4;       -- aspect ratio (for warp math)
+        ARY       : integer := 3
     );
     port (
-        clk         : in  std_logic;
+        clk         : in  std_logic;        -- = clk_video
         reset       : in  std_logic;
 
         warp_en     : in  std_logic;
         curvature_k : in  unsigned(2 downto 0);
+        bilinear_en : in  std_logic;        -- 1=bilinear (4-bank pixel fetch), 0=NN
 
-        dst_w       : in  unsigned(11 downto 0);
-        dst_h       : in  unsigned(11 downto 0);
+        ce_pix      : in  std_logic;        -- pixel enable
 
-        ce_pix_in   : in  std_logic;
-        din         : in  std_logic_vector(23 downto 0);
+        r_in        : in  std_logic_vector(7 downto 0);
+        g_in        : in  std_logic_vector(7 downto 0);
+        b_in        : in  std_logic_vector(7 downto 0);
         hs_in       : in  std_logic;
         vs_in       : in  std_logic;
         de_in       : in  std_logic;
 
-        ce_pix_out  : out std_logic;
-        dout        : out std_logic_vector(23 downto 0);
+        r_out       : out std_logic_vector(7 downto 0);
+        g_out       : out std_logic_vector(7 downto 0);
+        b_out       : out std_logic_vector(7 downto 0);
         hs_out      : out std_logic;
         vs_out      : out std_logic;
-        de_out      : out std_logic;
-
-        avl_address       : out std_logic_vector(AW - 1 downto 0);
-        avl_burstcount    : out std_logic_vector(BCW - 1 downto 0);
-        avl_writedata     : out std_logic_vector(DW - 1 downto 0);
-        avl_byteenable    : out std_logic_vector(BEW - 1 downto 0);
-        avl_write         : out std_logic;
-        avl_read          : out std_logic;
-        avl_readdata      : in  std_logic_vector(DW - 1 downto 0);
-        avl_readdatavalid : in  std_logic;
-        avl_waitrequest   : in  std_logic
+        de_out      : out std_logic
     );
 
     attribute keep    : boolean;
@@ -106,105 +83,89 @@ entity vis_warp_v2_wp is
     attribute noprune of warp_en     : signal is true;
     attribute keep    of curvature_k : signal is true;
     attribute noprune of curvature_k : signal is true;
+    attribute keep    of bilinear_en : signal is true;
+    attribute noprune of bilinear_en : signal is true;
 end entity;
 
 architecture rtl of vis_warp_v2_wp is
 
-    constant STRIDE_WORDS : integer := (MAX_DST_W + C_PIXELS_PER_WORD - 1)
-                                       / C_PIXELS_PER_WORD;
-    constant ADDR_BYTE_SHIFT : integer := 4;   -- 16 bytes per 128-bit word
+    -- ---- Derived sizes ----
+    -- v3.1: pixel buffer is split into 4 banks by (x mod 2, y mod 2) so all
+    -- 4 bilinear neighbors can be fetched in a single clk cycle. Total
+    -- storage is unchanged (same number of pixels, same bit depth); only
+    -- the bank arrangement differs. Each bank's depth is the original
+    -- BUFFER_DEPTH/4. Per-bank parameters:
+    --   N_HLINES   = N_LINES / 2     -- 64 half-rows per bank
+    --   HALF_W     = MAX_SRC_W / 2   -- 256 half-cols per bank
+    --   BANK_DEPTH = N_HLINES * HALF_W = 64 * 256 = 16384 entries
+    -- At RGB888 (24 bits): 16384 * 24 = ~38 M10K blocks per bank → ~152
+    -- across all 4 banks (vs ~165 for the prior single-bank layout).
+    constant BUFFER_DEPTH : integer := N_LINES * MAX_SRC_W;
+    constant N_HLINES     : integer := N_LINES / 2;     -- 64
+    constant HALF_W       : integer := MAX_SRC_W / 2;   -- 256
+    constant BANK_DEPTH   : integer := N_HLINES * HALF_W;
+    constant LINE_ADDR_W  : integer := 7;   -- log2(N_LINES) = log2(128)
+    constant COL_ADDR_W   : integer := 9;   -- log2(MAX_SRC_W) = log2(512)
 
-    -- ---- Bank ping-pong ----
-    signal bank_sel   : std_logic := '0';
-    signal vs_in_d    : std_logic := '0';
+    -- ---- Pixel banks (M10K-inferred, 4-way split) ----
+    -- Naming: pb_<y_parity><x_parity>. e.g. pb_eo holds pixels with even
+    -- y and odd x. Every input pixel writes to exactly one bank. Every
+    -- read cycle reads from ALL four banks; the bilinear muxer routes
+    -- each bank output to one of (p00, p01, p10, p11) based on the
+    -- low bit of floor_x / floor_y.
+    type pixel_bank_t is array (0 to BANK_DEPTH - 1) of std_logic_vector(23 downto 0);
+    signal pb_ee : pixel_bank_t;  -- y even, x even
+    signal pb_eo : pixel_bank_t;  -- y even, x odd
+    signal pb_oe : pixel_bank_t;  -- y odd,  x even
+    signal pb_oo : pixel_bank_t;  -- y odd,  x odd
+    -- (sync_buf removed: sync state travels via side_pipe + s12_*/s13_*
+    -- registered chain, not via M10K. The previous sync_buf signal was
+    -- a dead write port and confused the synthesizer.)
+
+    -- ---- Input edge detect ----
+    signal hs_in_d, vs_in_d, de_in_d : std_logic := '0';
     signal vs_rising  : std_logic;
+    signal de_falling : std_logic;
 
-    -- ---- Write side state ----
-    signal cnt_x_w      : integer range 0 to MAX_DST_W - 1 := 0;
-    signal cnt_y_w      : integer range 0 to MAX_DST_H - 1 := 0;
-    signal wr_pix_phase : integer range 0 to 3 := 0;
-    signal wr_pix0      : std_logic_vector(23 downto 0) := (others => '0');
-    signal wr_pix1      : std_logic_vector(23 downto 0) := (others => '0');
-    signal wr_pix2      : std_logic_vector(23 downto 0) := (others => '0');
-    signal wr_pending   : std_logic := '0';
-    signal wr_addr_word : integer := 0;
-    signal wr_data      : std_logic_vector(127 downto 0) := (others => '0');
+    -- ---- Source-dim auto-detector (latches each vs_in rising) ----
+    -- Counts active pixels per line and active lines per frame, then
+    -- latches on vs_in rising. First frame uses defaults; second frame
+    -- onward uses learned dims. Defaults (288, 224) cover Galaga.
+    signal det_x_in_line  : integer range 0 to MAX_SRC_W := 0;
+    signal det_x_max      : integer range 0 to MAX_SRC_W := 0;
+    signal det_y_in_frame : integer range 0 to N_LINES * 4 := 0;
+    signal src_w_latched  : integer range 0 to MAX_SRC_W := 288;
+    signal src_h_latched  : integer range 0 to 4095      := 224;
 
-    -- ---- Input-sync edge detect ----
-    -- hs_in_d / de_in_d are 1-cycle delayed versions of the input sync.
-    -- de_in falling edge = end of an active row -> advance cnt_y_o and
-    -- reset cnt_x_o. (hs_in_d kept around in case future code needs
-    -- hs_in rising for guidance; not strictly used yet.)
-    signal hs_in_d      : std_logic := '0';
-    signal de_in_d      : std_logic := '0';
-    signal de_in_falling : std_logic;
+    -- ---- Input write cursor (advances per ce_pix && de_in) ----
+    signal cnt_x_w : integer range 0 to MAX_SRC_W := 0;
+    signal cnt_y_w : integer range 0 to 4095      := 0;
 
-    -- ---- Read side raster counter ----
-    -- cnt_x_o / cnt_y_o track current INPUT pixel position. Driven from
-    -- input sync, NOT a free-running counter. Feeds the warp math
-    -- (dx = cnt_x_o - DST_CX, etc.) and the identity src lookup.
-    signal cnt_x_o      : integer := 0;
-    signal cnt_y_o      : integer := 0;
-
-    -- Source coord for the read being issued THIS cycle
-    signal src_x_now    : integer := 0;
-    signal src_y_now    : integer := 0;
-    -- read_reg: registered avl_read decision derived from the SAME
-    -- pre-T v_in_act + wr_pending values as pipe(0).rd_en. Keeping them
-    -- both registered from the same source eliminates the 1-cycle skew
-    -- that previously dropped the first read of every active row.
-    signal read_reg     : std_logic := '0';
-    signal read_active  : std_logic := '0';
-    signal rd_word_addr : integer := 0;
-
-    -- ---- Read pipeline delay-line ----
-    -- Depth = READ_LAT + 2 to align with the mock's effective latency.
-    -- Trace: pipe(0) scheduled at edge T, post-T value visible at pre-T+1.
-    -- Mock samples avl_read at pre-T+1 (= the registered read_reg from edge T).
-    -- Mock's rd_pipe shifts READ_LAT times, then schedules readdatavalid on
-    -- the next edge — so readdatavalid='1' visible at pre-T+READ_LAT+2.
-    -- pipe(K) holds the entry at pre-T+K+1, so K = READ_LAT+1 aligns =>
-    -- pipe depth indexes 0..READ_LAT+1 (= READ_LAT+2 total slots).
-    type pipe_entry_t is record
-        lane  : integer range 0 to 3;
-        hs    : std_logic;
-        vs    : std_logic;
-        de    : std_logic;
-        rd_en : std_logic;
-    end record;
-    type pipe_t is array (natural range <>) of pipe_entry_t;
-    constant PIPE_ENTRY_ZERO : pipe_entry_t :=
-        (lane => 0, hs => '0', vs => '0', de => '0', rd_en => '0');
-    signal pipe : pipe_t(0 to READ_LAT + 1) := (others => PIPE_ENTRY_ZERO);
-
-    -- Combinationally-derived "actual read fires this cycle" — used by
-    -- both the pipe insertion (rd_en) and the Avalon master mux.
-    signal read_fire : std_logic;
-
-    -- ============================================================
-    -- WARP PIPELINE (move 8 — timing closure on clk_hdmi)
-    -- ============================================================
-    -- The warp math was a single deep combinational chain in move 5b
-    -- (~9 dependent multiplies + LUT + clamp). At HDMI pixel clock
-    -- (~148.5 MHz, 6.7 ns period) that chain took ~66 ns → -59 ns
-    -- setup slack in the FIT. Move 8 splits it into N_WARP_STAGES
-    -- registered stages, each with ≤1 multiply, so each stage fits
-    -- comfortably in one clk_hdmi period.
+    -- ---- Output read cursor (no delay in v1 — same as input cursor) ----
+    -- In v1 the output raster is identical to input raster. The buffer's
+    -- "most recently captured line" is the line of the input pixel
+    -- currently being processed; we clamp src_y to [cnt_y_w - N_LINES + 1,
+    -- cnt_y_w] so the warp can't pull from yet-to-be-written lines.
     --
-    -- side_pipe carries position + sync state through the pipeline
-    -- so that when the warp result emerges at stage N_WARP_STAGES,
-    -- it can be paired with the *correct* output pixel's (de, hs, vs).
-    -- s2..s11 are the live arithmetic outputs per stage.
+    -- (v2 will add N/2-line output delay so the warp can pull from
+    -- future-relative-to-output lines, fixing the weak-bow-at-top-edge
+    -- artifact. v1 ships first.)
+
+    -- ============================================================
+    -- WARP PIPELINE (salvaged verbatim from prior DDR3 design)
+    -- ============================================================
+    -- Same 16-stage math; only difference is it now drives an M10K
+    -- read address at stage 12 instead of a DDR3 word address.
     constant N_WARP_STAGES : integer := 16;
 
     type warp_side_t is record
-        cnt_x_o  : integer range 0 to MAX_DST_W + 4095;  -- generous headroom
-        cnt_y_o  : integer range 0 to MAX_DST_H + 4095;
+        cnt_x_o  : integer range 0 to MAX_SRC_W + 4095;
+        cnt_y_o  : integer range 0 to 4095;
         dx       : signed(15 downto 0);
         dy       : signed(15 downto 0);
-        de       : std_logic;
         hs       : std_logic;
         vs       : std_logic;
+        de       : std_logic;
         v_in_act : std_logic;
         warp_en  : std_logic;
         k        : unsigned(2 downto 0);
@@ -213,7 +174,7 @@ architecture rtl of vis_warp_v2_wp is
     constant WARP_SIDE_ZERO : warp_side_t := (
         cnt_x_o => 0, cnt_y_o => 0,
         dx => (others => '0'), dy => (others => '0'),
-        de => '0', hs => '0', vs => '0',
+        hs => '0', vs => '0', de => '0',
         v_in_act => '0', warp_en => '0',
         k => (others => '0')
     );
@@ -221,55 +182,90 @@ architecture rtl of vis_warp_v2_wp is
     type warp_side_pipe_t is array (1 to N_WARP_STAGES) of warp_side_t;
     signal side_pipe : warp_side_pipe_t := (others => WARP_SIDE_ZERO);
 
-    -- Live arithmetic per stage. Each is the REGISTERED output of stage N,
-    -- valid as input to stage N+1.
-    -- Width-narrowing for DSP block fit: the realistic max under any
-    -- sane dst dim (MAX_DST_W=1920 → dx max=960, dx² max ≈ 9.2e5) fits
-    -- in 21 bits unsigned. signed(26:0) gives generous headroom while
-    -- keeping the operand within Cyclone V's 27×27 DSP block (single
-    -- block, no inter-block routing delay). Original signed(31:0) was
-    -- forcing Quartus to span 2 DSPs which busted clk_hdmi by ~3 ns.
+    -- Arithmetic-pipeline signals (verbatim names from prior design)
     signal s2_dx2, s2_dy2          : signed(26 downto 0) := (others => '0');
-    -- AX2 ≤ 508 fits in signed(10:0). Product max ≈ 5e8 → signed(30:0).
     signal s3_ax2dx2, s3_ay2dy2    : signed(30 downto 0) := (others => '0');
     signal s4_r2                   : signed(31 downto 0) := (others => '0');
     signal s5_m_lo, s5_m_hi        : unsigned(15 downto 0) := (others => '0');
     signal s5_frac                 : unsigned(7 downto 0) := (others => '0');
-    -- Stage 5b: buffer the ROM outputs through a flip-flop with normal
-    -- clock-to-Q. The altsyncram block's PORT_A clock-to-Q (~5 ns) leaves
-    -- no headroom for the sub+mul that follows; a single intervening
-    -- register restores per-stage timing closure.
     signal s5b_m_lo, s5b_m_hi      : unsigned(15 downto 0) := (others => '0');
     signal s5b_frac                : unsigned(7 downto 0) := (others => '0');
-    -- Stage 5c: separates the sub (m_hi - m_lo) from the mul (×frac).
-    -- Combining them in one cycle put the path ~2 ns over budget.
     signal s5c_m_diff              : signed(16 downto 0) := (others => '0');
     signal s5c_m_lo                : unsigned(15 downto 0) := (others => '0');
     signal s5c_frac                : unsigned(7 downto 0) := (others => '0');
     signal s6_m_diff_frac          : signed(24 downto 0) := (others => '0');
     signal s6_m_lo                 : unsigned(15 downto 0) := (others => '0');
     signal s7_m_raw                : unsigned(15 downto 0) := (others => '0');
-    -- Stage 7b: separate (m_raw - 32768) sub from the *K mul. Same
-    -- "sub + mul in one cycle" pattern as 5c → 6.
     signal s7b_m_centered          : signed(17 downto 0) := (others => '0');
     signal s8_m_scaled_pre         : signed(20 downto 0) := (others => '0');
     signal s9_m_scaled             : unsigned(15 downto 0) := (others => '0');
     signal s10_dx_m, s10_dy_m      : signed(31 downto 0) := (others => '0');
-    -- Stage 10b: split the (DST_C << 15) + dx*M add from the
-    -- downstream shift+clamp+warp_en-mux chain. The combined version
-    -- (~32-bit add + shift + 2 compares + 2 muxes) was just over budget.
     signal s10b_src_x_q15          : signed(31 downto 0) := (others => '0');
     signal s10b_src_y_q15          : signed(31 downto 0) := (others => '0');
     signal s11_src_x, s11_src_y    : integer range 0 to 4095 := 0;
-    -- Stage 12: register the post-pipeline word-address computation
-    -- (mul s11_src_y * STRIDE + bank + s11_src_x/4) so pipe(0) only
-    -- has trivial register loads. The mul alone was ~0.5 ns over.
-    signal s12_word_addr           : integer := 0;
-    signal s12_lane                : integer range 0 to 3 := 0;
+    -- s11_fx / s11_fy: 8-bit fractional parts of warped (src_x, src_y),
+    -- representing values in [0, 256). Extracted from s10b_*_q15 bits
+    -- [14:7]. Used by the bilinear stages 14/15. NN path ignores them.
+    signal s11_fx, s11_fy          : unsigned(7 downto 0) := (others => '0');
 
-    -- ---- Warp helpers (used when warp_en='1') ----
-    -- Lookup with linear interp. Returns M as Q1.15 unsigned.
-    -- Salvaged from parked stage-3c work — concept is unchanged.
+    -- Stage 12: per-bank read addresses (4 banks → 4 read addresses)
+    -- plus the fractional parts and the parity bits floor_x[0]/floor_y[0]
+    -- needed by stage 13's bank-to-(p00,p01,p10,p11) muxing. Sync (hs/vs/de)
+    -- carries through alongside.
+    signal s12_addr_ee, s12_addr_eo, s12_addr_oe, s12_addr_oo
+        : integer range 0 to BANK_DEPTH - 1 := 0;
+    signal s12_fx, s12_fy          : unsigned(7 downto 0) := (others => '0');
+    signal s12_fxp, s12_fyp        : std_logic := '0';  -- floor_x[0], floor_y[0]
+    signal s12_hs, s12_vs, s12_de  : std_logic := '0';
+    signal s12_bilinear            : std_logic := '0';
+
+    -- Stage 13: bank read data captured (1-cycle latency). After muxing
+    -- by (s12_fxp, s12_fyp), routed to (p00, p01, p10, p11).
+    -- s13_q_ee/eo/oe/oo are the raw bank outputs; p00..p11 are the
+    -- muxed bilinear neighbours.
+    signal s13_q_ee, s13_q_eo, s13_q_oe, s13_q_oo
+        : std_logic_vector(23 downto 0) := (others => '0');
+    signal s13_p00, s13_p01, s13_p10, s13_p11
+        : std_logic_vector(23 downto 0) := (others => '0');
+    signal s13_fx, s13_fy          : unsigned(7 downto 0) := (others => '0');
+    signal s13_hs, s13_vs, s13_de  : std_logic := '0';
+    signal s13_bilinear            : std_logic := '0';
+    -- Back-compat alias: legacy code (output emitter) used s13_pixel as
+    -- the NN output. With bilinear gating the emitter consumes s16_pixel.
+    -- s13_pixel is kept only as the un-muxed NN pixel for traceability
+    -- via SignalTap, but no longer drives r/g/b_out.
+    signal s13_pixel               : std_logic_vector(23 downto 0) := (others => '0');
+
+    -- Stage 14: horizontal lerp. Per channel:
+    --   top_<c> = p00.<c> * (256 - fx) + p01.<c> * fx       -- 16-bit
+    --   bot_<c> = p10.<c> * (256 - fx) + p11.<c> * fx       -- 16-bit
+    -- Width: 8-bit pixel * 9-bit weight (max 256) = 17-bit max, but
+    -- the sum of (a*(256-fx) + b*fx) is bounded by 255*256 = 65280, so
+    -- 16 bits suffice. We use 17 bits to keep headroom for the synth.
+    signal s14_top_r, s14_top_g, s14_top_b : unsigned(16 downto 0) := (others => '0');
+    signal s14_bot_r, s14_bot_g, s14_bot_b : unsigned(16 downto 0) := (others => '0');
+    signal s14_fy          : unsigned(7 downto 0) := (others => '0');
+    signal s14_hs, s14_vs, s14_de : std_logic := '0';
+    signal s14_bilinear    : std_logic := '0';
+    -- NN pass-through alongside the bilinear math (so we can mux at s16).
+    signal s14_p00         : std_logic_vector(23 downto 0) := (others => '0');
+
+    -- Stage 15: vertical lerp. Per channel:
+    --   out_<c>_25 = top_<c> * (256 - fy) + bot_<c> * fy    -- 17*9 + 17*9 = 26-bit
+    -- We need to >>16 to recover the final 8-bit channel value.
+    -- Width: 17 * 9 = 26 bits max → use 26-bit signal, then take [23:16].
+    signal s15_r25, s15_g25, s15_b25 : unsigned(25 downto 0) := (others => '0');
+    signal s15_hs, s15_vs, s15_de : std_logic := '0';
+    signal s15_bilinear    : std_logic := '0';
+    signal s15_p00         : std_logic_vector(23 downto 0) := (others => '0');
+
+    -- Stage 16: final pixel — mux between bilinear result and NN p00.
+    signal s16_pixel : std_logic_vector(23 downto 0) := (others => '0');
+    signal s16_hs, s16_vs, s16_de : std_logic := '0';
+
+    -- ============================================================
+    -- Helper functions (verbatim from prior design)
+    -- ============================================================
     function warp_m_lookup(r2_q24 : unsigned(31 downto 0)) return unsigned is
         variable r2_sat : unsigned(23 downto 0);
         variable idx   : integer range 0 to 255;
@@ -292,11 +288,6 @@ architecture rtl of vis_warp_v2_wp is
         return m_lo + unsigned(prod(23 downto 8));
     end function;
 
-    -- Apply runtime curvature K (0..7) to LUT-interpolated M.
-    -- Concept salvaged from parked wip-stage3c-rescue:
-    --   K=0 -> identity (M=32768),  K=2 -> bit-exact LUT value,
-    --   K>2 -> stronger curvature,  K<2 -> weaker.
-    -- Formula: result = 32768 + ((m_raw - 32768) * K) / 2.
     function scale_m_by_curv(m_raw : unsigned(15 downto 0);
                              k     : unsigned(2 downto 0)) return unsigned is
         variable m_delta  : signed(17 downto 0);
@@ -318,117 +309,86 @@ architecture rtl of vis_warp_v2_wp is
 begin
 
     -- ============================================================
-    -- vs edge detect + bank swap
+    -- Input edge detect (combinational from registered _d signals)
+    -- ============================================================
+    vs_rising  <= '1' when (vs_in = '1' and vs_in_d = '0') else '0';
+    de_falling <= '1' when (de_in = '0' and de_in_d = '1') else '0';
+
+    -- ============================================================
+    -- Source-dim auto-detector + input write cursor. All ce_pix-gated.
+    -- (pixel_buf writes have moved to the dedicated RAM process below.)
     -- ============================================================
     process(clk)
     begin
         if rising_edge(clk) then
             if reset = '1' then
-                vs_in_d  <= '0';
-                bank_sel <= '0';
-            else
+                hs_in_d <= '0';
+                vs_in_d <= '0';
+                de_in_d <= '0';
+                cnt_x_w <= 0;
+                cnt_y_w <= 0;
+                det_x_in_line  <= 0;
+                det_x_max      <= 0;
+                det_y_in_frame <= 0;
+                src_w_latched  <= 288;
+                src_h_latched  <= 224;
+            elsif ce_pix = '1' then
+                -- 1-cycle delayed edge-detect copies (gated on ce_pix)
+                hs_in_d <= hs_in;
                 vs_in_d <= vs_in;
-                if vs_in = '1' and vs_in_d = '0' then
-                    bank_sel <= not bank_sel;
-                end if;
-            end if;
-        end if;
-    end process;
-    vs_rising     <= '1' when (vs_in = '1' and vs_in_d = '0') else '0';
-    de_in_falling <= '1' when (de_in = '0' and de_in_d = '1') else '0';
+                de_in_d <= de_in;
 
-    -- ============================================================
-    -- Write side: pack 4 pixels -> 128-bit word -> DDR3 write.
-    -- ============================================================
-    process(clk)
-        variable v_word_addr : integer;
-        variable v_base      : integer;
-    begin
-        if rising_edge(clk) then
-            if reset = '1' then
-                cnt_x_w      <= 0;
-                cnt_y_w      <= 0;
-                wr_pix_phase <= 0;
-                wr_pending   <= '0';
-                wr_addr_word <= 0;
-                wr_data      <= (others => '0');
-                wr_pix0 <= (others => '0');
-                wr_pix1 <= (others => '0');
-                wr_pix2 <= (others => '0');
-            else
+                -- ---- Source-dim detector ----
                 if vs_rising = '1' then
-                    cnt_x_w      <= 0;
-                    cnt_y_w      <= 0;
-                    wr_pix_phase <= 0;
-                elsif ce_pix_in = '1' and de_in = '1' then
-                    case wr_pix_phase is
-                        when 0 => wr_pix0 <= din;
-                        when 1 => wr_pix1 <= din;
-                        when 2 => wr_pix2 <= din;
-                        when others => null;
-                    end case;
-
-                    if wr_pix_phase = 3 then
-                        if bank_sel = '0' then
-                            v_base := BANK_A_BASE;
-                        else
-                            v_base := BANK_B_BASE;
-                        end if;
-                        v_word_addr := v_base + cnt_y_w * STRIDE_WORDS
-                                       + (cnt_x_w / C_PIXELS_PER_WORD);
-                        wr_addr_word <= v_word_addr;
-                        wr_data      <= pack_4pix(wr_pix0, wr_pix1, wr_pix2, din);
-                        wr_pending   <= '1';
-                        wr_pix_phase <= 0;
-                    else
-                        wr_pix_phase <= wr_pix_phase + 1;
+                    -- end of frame: latch and reset
+                    if det_x_max > 0 then
+                        src_w_latched <= det_x_max;
                     end if;
-
-                    -- Wrap on dst_w / dst_h (the LIVE frame dimensions),
-                    -- not MAX. The MAX_DST_* generics size storage; the
-                    -- counter walks the active frame.
-                    if cnt_x_w = to_integer(dst_w) - 1 then
-                        cnt_x_w <= 0;
-                        if cnt_y_w = to_integer(dst_h) - 1 then
-                            cnt_y_w <= 0;
-                        else
-                            cnt_y_w <= cnt_y_w + 1;
-                        end if;
-                    else
-                        cnt_x_w <= cnt_x_w + 1;
+                    if det_y_in_frame > 0 then
+                        src_h_latched <= det_y_in_frame;
                     end if;
+                    det_x_max      <= 0;
+                    det_x_in_line  <= 0;
+                    det_y_in_frame <= 0;
+                elsif de_falling = '1' and de_in_d = '1' then
+                    -- end of active line
+                    if det_x_in_line > det_x_max then
+                        det_x_max <= det_x_in_line;
+                    end if;
+                    det_x_in_line <= 0;
+                    if det_x_in_line > 0 then
+                        det_y_in_frame <= det_y_in_frame + 1;
+                    end if;
+                elsif de_in = '1' then
+                    det_x_in_line <= det_x_in_line + 1;
                 end if;
 
-                if wr_pending = '1' and avl_waitrequest = '0' then
-                    wr_pending <= '0';
+                -- ---- Input write cursor + buffer write ----
+                if vs_rising = '1' then
+                    cnt_x_w <= 0;
+                    cnt_y_w <= 0;
+                elsif de_falling = '1' then
+                    cnt_x_w <= 0;
+                    cnt_y_w <= cnt_y_w + 1;
+                elsif de_in = '1' then
+                    -- (pixel_buf write moved to a dedicated single-process
+                    -- block below for reliable M10K inference.)
+                    cnt_x_w <= cnt_x_w + 1;
                 end if;
             end if;
         end if;
     end process;
 
     -- ============================================================
-    -- Read side: walk output raster, compute src coord via the
-    -- pipelined warp math, issue read, shift sync info through the
-    -- DDR3 delay line.
-    --
-    -- Pipeline structure (11 stages, each ≤1 multiply or ROM read):
-    --   S1: dx, dy = cnt_x_o/y - DST_CX/Y                     (subs)
-    --   S2: dx² (mul), dy² (mul)                              [parallel]
-    --   S3: AX2·dx² (mul), AY2·dy² (mul)                      [parallel]
-    --   S4: r² = AX2·dx² + AY2·dy²                            (add)
-    --   S5: m_lo, m_hi = LUT[idx], LUT[idx+1]; carry frac     (ROM)
-    --   S5b: buffer m_lo, m_hi, frac through a regular FF     (FF only — see note above)
-    --   S5c: m_diff = m_hi - m_lo; carry m_lo, frac           (sub only)
-    --   S6: m_diff * frac; carry m_lo                          (mul)
-    --   S7: m_raw = m_lo + (prod >> 8)                        (add+shift)
-    --   S7b: m_centered = m_raw - 32768                       (sub only)
-    --   S8: m_scaled_pre = m_centered * K                     (mul)
-    --   S9: m_scaled = clamp(32768 + m_scaled_pre/2)          (add+clamp)
-    --   S10: dx*m_scaled (mul), dy*m_scaled (mul)             [parallel]
-    --   S10b: src_q15 = (DST_C << 15) + dx*M                  (add only)
-    --   S11: src = clamp(src_q15 >> 15); warp_en mux          (shift+clamp+mux)
-    --   S12: word_addr = bank + src_y*STRIDE + src_x/4; lane  (mul+add)
-    -- After S12: pipe(0) registered from side_pipe(N_WARP_STAGES) + s12_*.
+    -- WARP PIPELINE (ce_pix-gated)
+    -- ============================================================
+    -- Stage 1: register current cycle's (cnt_x_w, cnt_y_w, dx, dy,
+    -- hs_in, vs_in, de_in) into side_pipe(1).
+    -- Stages 2..11: same arithmetic as the prior DDR3-based v2_wp.
+    -- Stage 12: compute M10K read address from (src_x, src_y) clamped
+    -- to (src_w_latched, src_h_latched) AND to the most-recently-
+    -- captured line range [cnt_y_w - N_LINES + 1, cnt_y_w].
+    -- Stage 13: M10K read result (registered by M10K block).
     -- ============================================================
     process(clk)
         variable v_in_act  : boolean;
@@ -436,14 +396,9 @@ begin
         variable v_dst_cy  : integer;
         variable v_dx_int  : integer;
         variable v_dy_int  : integer;
-        -- Stage 5 (LUT index) scratch
         variable v_idx     : integer range 0 to 256;
         variable v_frac    : unsigned(7 downto 0);
-        -- Stage 6 scratch
-        variable v_m_diff  : signed(16 downto 0);
-        -- Stage 9 (m_scaled clamp) scratch
         variable v_m_acc   : integer;
-        -- Stage 11 (src clamp + warp_en mux) scratch
         variable v_src_x_q15 : integer;
         variable v_src_y_q15 : integer;
         variable v_src_x_pre : integer;
@@ -452,23 +407,32 @@ begin
         variable v_src_y_id  : integer;
         variable v_src_x_fin : integer;
         variable v_src_y_fin : integer;
-        -- After S11: word addr + bank + lane
-        variable v_base    : integer;
-        variable v_word    : integer;
-        variable v_lane    : integer range 0 to 3;
+        variable v_line_min  : integer;
+        variable v_rd_addr   : integer;
+        -- v3.1 (bilinear) — per-stage scratch:
+        variable v_fx_u      : unsigned(7 downto 0);
+        variable v_fy_u      : unsigned(7 downto 0);
+        variable v_q15_pos_x : unsigned(30 downto 0);  -- abs value, for frac extraction
+        variable v_q15_pos_y : unsigned(30 downto 0);
+        -- Stage 12 bank-address scratch:
+        variable v_fx_lo, v_fy_lo   : integer;        -- floor_x, floor_y (clamped)
+        variable v_fx_hi, v_fy_hi   : integer;        -- floor_x+1, floor_y+1 (clamped)
+        variable v_x_lo_h, v_x_hi_h : integer;        -- half-cols  (>>1)
+        variable v_y_lo_h, v_y_hi_h : integer;        -- half-rows  (>>1)
+        variable v_x_lo_p           : std_logic;      -- parity bit (floor_x[0])
+        variable v_x_hi_p           : std_logic;      -- (kept for clarity; = not v_x_lo_p unless clamped)
+        variable v_y_lo_p           : std_logic;
+        variable v_y_hi_p           : std_logic;
+        variable v_a_ee, v_a_eo     : integer;
+        variable v_a_oe, v_a_oo     : integer;
+        variable v_parity_sel       : std_logic_vector(1 downto 0);
+        -- Stage 14 lerp scratch:
+        variable v_one_minus_fx : unsigned(8 downto 0);
+        -- Stage 15 lerp scratch:
+        variable v_one_minus_fy : unsigned(8 downto 0);
     begin
         if rising_edge(clk) then
             if reset = '1' then
-                cnt_x_o   <= 0;
-                cnt_y_o   <= 0;
-                hs_in_d   <= '0';
-                de_in_d   <= '0';
-                pipe      <= (others => PIPE_ENTRY_ZERO);
-                src_x_now <= 0;
-                src_y_now <= 0;
-                read_active <= '0';
-                read_reg    <= '0';
-                rd_word_addr <= 0;
                 side_pipe <= (others => WARP_SIDE_ZERO);
                 s2_dx2 <= (others => '0'); s2_dy2 <= (others => '0');
                 s3_ax2dx2 <= (others => '0'); s3_ay2dy2 <= (others => '0');
@@ -487,83 +451,73 @@ begin
                 s10_dx_m <= (others => '0'); s10_dy_m <= (others => '0');
                 s10b_src_x_q15 <= (others => '0'); s10b_src_y_q15 <= (others => '0');
                 s11_src_x <= 0; s11_src_y <= 0;
-                s12_word_addr <= 0; s12_lane <= 0;
-            else
-                -- ---- Input-sync edge registers ----
-                hs_in_d <= hs_in;
-                de_in_d <= de_in;
-
-                -- ---- Input-driven raster counter ----
-                -- vs rising  -> reset cnt_y_o (and cnt_x_o defensively).
-                -- de falling -> end of an active row: cnt_x_o<=0; cnt_y_o++.
-                -- de high    -> active pixel: cnt_x_o++.
-                -- During hblank/vblank (de='0', no falling edge this cycle)
-                -- both counters hold. cnt_x_o always reflects the position
-                -- of the pixel being registered into side_pipe(1) THIS cycle.
-                if vs_rising = '1' then
-                    cnt_x_o <= 0;
-                    cnt_y_o <= 0;
-                elsif de_in_falling = '1' then
-                    cnt_x_o <= 0;
-                    cnt_y_o <= cnt_y_o + 1;
-                elsif de_in = '1' then
-                    cnt_x_o <= cnt_x_o + 1;
-                end if;
-
-                -- ---- Combinational at stage 1 input ----
-                -- v_in_act now == de_in: an active input pixel is being
-                -- registered into the pipeline. Read issuance downstream
-                -- still gates on side_pipe(N).v_in_act (= de_in delayed).
+                s11_fx <= (others => '0'); s11_fy <= (others => '0');
+                s12_addr_ee <= 0; s12_addr_eo <= 0;
+                s12_addr_oe <= 0; s12_addr_oo <= 0;
+                s12_fx <= (others => '0'); s12_fy <= (others => '0');
+                s12_fxp <= '0'; s12_fyp <= '0';
+                s12_hs <= '0'; s12_vs <= '0'; s12_de <= '0';
+                s12_bilinear <= '0';
+                -- (s13_q_ee/eo/oe/oo and s13_pixel are driven by the
+                -- dedicated pixel-bank single-process block below; reset
+                -- there.)
+                s13_p00 <= (others => '0'); s13_p01 <= (others => '0');
+                s13_p10 <= (others => '0'); s13_p11 <= (others => '0');
+                s13_fx <= (others => '0'); s13_fy <= (others => '0');
+                s13_hs <= '0'; s13_vs <= '0'; s13_de <= '0';
+                s13_bilinear <= '0';
+                s14_top_r <= (others => '0'); s14_top_g <= (others => '0');
+                s14_top_b <= (others => '0');
+                s14_bot_r <= (others => '0'); s14_bot_g <= (others => '0');
+                s14_bot_b <= (others => '0');
+                s14_fy <= (others => '0');
+                s14_hs <= '0'; s14_vs <= '0'; s14_de <= '0';
+                s14_bilinear <= '0';
+                s14_p00 <= (others => '0');
+                s15_r25 <= (others => '0'); s15_g25 <= (others => '0');
+                s15_b25 <= (others => '0');
+                s15_hs <= '0'; s15_vs <= '0'; s15_de <= '0';
+                s15_bilinear <= '0';
+                s15_p00 <= (others => '0');
+                s16_pixel <= (others => '0');
+                s16_hs <= '0'; s16_vs <= '0'; s16_de <= '0';
+            elsif ce_pix = '1' then
+                -- Stage 1 input
                 v_in_act := (de_in = '1');
-                v_dst_cx := to_integer(dst_w) / 2;
-                v_dst_cy := to_integer(dst_h) / 2;
-                v_dx_int := cnt_x_o - v_dst_cx;
-                v_dy_int := cnt_y_o - v_dst_cy;
+                v_dst_cx := src_w_latched / 2;
+                v_dst_cy := src_h_latched / 2;
+                v_dx_int := cnt_x_w - v_dst_cx;
+                v_dy_int := cnt_y_w - v_dst_cy;
 
-                -- ====================================================
-                -- WARP PIPELINE
-                -- ====================================================
-
-                -- Side data shifts through every cycle.
+                -- side_pipe shift
                 for k in 2 to N_WARP_STAGES loop
                     side_pipe(k) <= side_pipe(k - 1);
                 end loop;
 
-                -- Stage 1 entry: register current cycle's raster + sync
-                -- state. hs/vs/de are pass-through from input — they
-                -- propagate through side_pipe + pipe to hs_out/vs_out/
-                -- de_out unchanged, preserving the upstream HDMI raster's
-                -- real blanking widths. v_in_act mirrors de_in for read
-                -- gating downstream.
-                side_pipe(1).cnt_x_o  <= cnt_x_o;
-                side_pipe(1).cnt_y_o  <= cnt_y_o;
+                side_pipe(1).cnt_x_o  <= cnt_x_w;
+                side_pipe(1).cnt_y_o  <= cnt_y_w;
                 side_pipe(1).dx       <= to_signed(v_dx_int, 16);
                 side_pipe(1).dy       <= to_signed(v_dy_int, 16);
-                side_pipe(1).de       <= de_in;
                 side_pipe(1).hs       <= hs_in;
                 side_pipe(1).vs       <= vs_in;
+                side_pipe(1).de       <= de_in;
                 side_pipe(1).v_in_act <= de_in;
                 side_pipe(1).warp_en  <= warp_en;
                 side_pipe(1).k        <= curvature_k;
 
-                -- Stage 2: parallel multipliers for dx², dy².
-                -- Resize narrows back to s2_*'length=27 (signed(26:0)).
+                -- Stage 2: dx², dy² (parallel multipliers)
                 s2_dx2 <= resize(side_pipe(1).dx * side_pipe(1).dx, s2_dx2'length);
                 s2_dy2 <= resize(side_pipe(1).dy * side_pipe(1).dy, s2_dy2'length);
 
-                -- Stage 3: AX2·dx², AY2·dy². Narrowed s2_* + narrow AX2
-                -- (≤508) keeps the product inside a single 27×27 DSP
-                -- block, avoiding the multi-DSP carry chain that
-                -- previously cost ~3 ns.
+                -- Stage 3: AX2·dx², AY2·dy²
                 s3_ax2dx2 <= resize(to_signed(LUT_AX2_Q24, 11) * s2_dx2, s3_ax2dx2'length);
                 s3_ay2dy2 <= resize(to_signed(LUT_AY2_Q24, 11) * s2_dy2, s3_ay2dy2'length);
 
-                -- Stage 4: sum into r².
+                -- Stage 4: r² = AX2·dx² + AY2·dy²
                 s4_r2 <= resize(s3_ax2dx2, s4_r2'length)
                        + resize(s3_ay2dy2, s4_r2'length);
 
-                -- Stage 5: extract idx + frac from r²; LUT read.
-                -- Saturate to 2²⁴ - 1 if r² would overflow the LUT range.
+                -- Stage 5: LUT lookup (idx + frac from r²)
                 if s4_r2 < 0 then
                     v_idx  := 0;
                     v_frac := (others => '0');
@@ -578,43 +532,37 @@ begin
                 s5_m_hi <= WARP_LUT(v_idx + 1);
                 s5_frac <= v_frac;
 
-                -- Stage 5b: buffer ROM outputs through a normal FF so
-                -- the sub in stage 5c starts from a register with
-                -- standard clock-to-Q instead of altsyncram's ~5 ns.
+                -- Stage 5b: FF buffer
                 s5b_m_lo <= s5_m_lo;
                 s5b_m_hi <= s5_m_hi;
                 s5b_frac <= s5_frac;
 
-                -- Stage 5c: separate the m_diff sub from the mul (which
-                -- now lives in stage 6 alone). Combining them put the
-                -- path ~2 ns over budget at clk_hdmi.
+                -- Stage 5c: m_diff sub
                 s5c_m_diff <= signed('0' & std_logic_vector(s5b_m_hi))
                             - signed('0' & std_logic_vector(s5b_m_lo));
                 s5c_m_lo   <= s5b_m_lo;
                 s5c_frac   <= s5b_frac;
 
-                -- Stage 6: m_diff * frac; carry m_lo.
+                -- Stage 6: m_diff * frac
                 s6_m_diff_frac <= resize(
                     s5c_m_diff * signed('0' & std_logic_vector(s5c_frac)),
                     s6_m_diff_frac'length);
                 s6_m_lo <= s5c_m_lo;
 
-                -- Stage 7: m_raw = m_lo + (prod >> 8).
+                -- Stage 7: m_raw = m_lo + (prod >> 8)
                 s7_m_raw <= s6_m_lo + unsigned(s6_m_diff_frac(23 downto 8));
 
-                -- Stage 7b: m_centered = m_raw - 32768 (sub only).
+                -- Stage 7b: m_centered = m_raw - 32768
                 s7b_m_centered <= resize(
                     signed('0' & std_logic_vector(s7_m_raw)) - to_signed(32768, 17),
                     s7b_m_centered'length);
 
-                -- Stage 8: m_scaled_pre = m_centered * K.
-                -- side_pipe index +3 vs the non-buffered version since
-                -- 5b, 5c, and 7b added three cycles of pipeline depth.
+                -- Stage 8: m_scaled_pre = m_centered * K
                 s8_m_scaled_pre <= resize(
                     s7b_m_centered * signed('0' & std_logic_vector(side_pipe(10).k)),
                     s8_m_scaled_pre'length);
 
-                -- Stage 9: clamp(32768 + m_scaled_pre/2).
+                -- Stage 9: clamp(32768 + m_scaled_pre/2)
                 v_m_acc := to_integer(s8_m_scaled_pre) / 2 + 32768;
                 if v_m_acc < 0 then
                     s9_m_scaled <= to_unsigned(0, 16);
@@ -624,42 +572,60 @@ begin
                     s9_m_scaled <= to_unsigned(v_m_acc, 16);
                 end if;
 
-                -- Stage 10: dx·M_scaled, dy·M_scaled.
-                -- signed(15:0) * signed(16:0) = signed(33:0); explicit
-                -- resize down to s10_dx_m'length=32 since the realistic
-                -- max under any sane dst dim fits comfortably.
-                -- side_pipe index +3 from non-buffered version.
+                -- Stage 10: dx·M_scaled, dy·M_scaled
                 s10_dx_m <= resize(side_pipe(12).dx * signed('0' & std_logic_vector(s9_m_scaled)), s10_dx_m'length);
                 s10_dy_m <= resize(side_pipe(12).dy * signed('0' & std_logic_vector(s9_m_scaled)), s10_dy_m'length);
 
-                -- Stage 10b: register src_q15 = (DST_C << 15) + dx·M
-                -- so stage 11 only has shift + clamp + mux work.
-                s10b_src_x_q15 <= to_signed(v_dst_cx * 32768, s10b_src_x_q15'length) + s10_dx_m;
-                s10b_src_y_q15 <= to_signed(v_dst_cy * 32768, s10b_src_y_q15'length) + s10_dy_m;
+                -- Stage 10b: src_q15 = (DST_C << 15) + dx·M
+                s10b_src_x_q15 <= to_signed((src_w_latched / 2) * 32768, s10b_src_x_q15'length) + s10_dx_m;
+                s10b_src_y_q15 <= to_signed((src_h_latched / 2) * 32768, s10b_src_y_q15'length) + s10_dy_m;
 
-                -- Stage 11: shift + clamp + warp_en mux.
+                -- Stage 11: shift + clamp + warp_en mux. Now also extracts
+                -- the 8-bit fractional parts (fx, fy) from the Q15 warped
+                -- coordinates. Fractional is the bits between the integer
+                -- (>>15) and the 8 LSB of frac — i.e. q15[14:7] interpreted
+                -- as unsigned [0..256). For the identity / clamped paths
+                -- the fractional is forced to 0 (no inter-pixel blend).
                 v_src_x_q15 := to_integer(s10b_src_x_q15);
                 v_src_y_q15 := to_integer(s10b_src_y_q15);
                 v_src_x_pre := v_src_x_q15 / 32768;
                 v_src_y_pre := v_src_y_q15 / 32768;
+                -- Fractional extraction: take the abs(q15) low 15 bits and
+                -- grab the upper 8. For negative q15 values we will clamp
+                -- to 0 below anyway, so just force frac=0 in that case.
+                if v_src_x_q15 < 0 then
+                    v_fx_u := (others => '0');
+                else
+                    v_q15_pos_x := to_unsigned(v_src_x_q15, 31);
+                    v_fx_u := v_q15_pos_x(14 downto 7);
+                end if;
+                if v_src_y_q15 < 0 then
+                    v_fy_u := (others => '0');
+                else
+                    v_q15_pos_y := to_unsigned(v_src_y_q15, 31);
+                    v_fy_u := v_q15_pos_y(14 downto 7);
+                end if;
                 if v_src_x_pre < 0 then
                     v_src_x_pre := 0;
-                elsif v_src_x_pre >= to_integer(dst_w) then
-                    v_src_x_pre := to_integer(dst_w) - 1;
+                    v_fx_u := (others => '0');
+                elsif v_src_x_pre >= src_w_latched - 1 then
+                    -- saturate: can't bilerp past the last column either
+                    v_src_x_pre := src_w_latched - 1;
+                    v_fx_u := (others => '0');
                 end if;
                 if v_src_y_pre < 0 then
                     v_src_y_pre := 0;
-                elsif v_src_y_pre >= to_integer(dst_h) then
-                    v_src_y_pre := to_integer(dst_h) - 1;
+                    v_fy_u := (others => '0');
+                elsif v_src_y_pre >= src_h_latched - 1 then
+                    v_src_y_pre := src_h_latched - 1;
+                    v_fy_u := (others => '0');
                 end if;
-                -- Identity: carry of cnt_x_o/y from 14 cycles ago,
-                -- clamped to active raster when v_in_act was true at
-                -- that cycle.
+                -- Identity from side_pipe(14)
                 if side_pipe(14).v_in_act = '1' then
                     v_src_x_id := side_pipe(14).cnt_x_o;
                     v_src_y_id := side_pipe(14).cnt_y_o;
-                    if v_src_x_id >= to_integer(dst_w) then v_src_x_id := to_integer(dst_w) - 1; end if;
-                    if v_src_y_id >= to_integer(dst_h) then v_src_y_id := to_integer(dst_h) - 1; end if;
+                    if v_src_x_id >= src_w_latched then v_src_x_id := src_w_latched - 1; end if;
+                    if v_src_y_id >= src_h_latched then v_src_y_id := src_h_latched - 1; end if;
                 else
                     v_src_x_id := 0;
                     v_src_y_id := 0;
@@ -667,99 +633,341 @@ begin
                 if side_pipe(14).warp_en = '1' then
                     s11_src_x <= v_src_x_pre;
                     s11_src_y <= v_src_y_pre;
+                    s11_fx    <= v_fx_u;
+                    s11_fy    <= v_fy_u;
                 else
                     s11_src_x <= v_src_x_id;
                     s11_src_y <= v_src_y_id;
+                    s11_fx    <= (others => '0');
+                    s11_fy    <= (others => '0');
                 end if;
 
-                -- ====================================================
-                -- Stage 12: word_addr + lane (registered).
-                -- Bank_sel is stable for entire frames so reading it
-                -- "current" vs side_pipe-aligned is fine in practice.
-                -- ====================================================
-                if bank_sel = '0' then
-                    v_base := BANK_B_BASE;
+                -- Stage 12: emit 4 bank read addresses (one per sub-bank).
+                -- Strategy:
+                --   floor = (s11_src_x, s11_src_y)          -- top-left of 2x2
+                --   floor+1 in each axis (with clamp)       -- bottom-right
+                --   half-col_lo = floor_x >> 1, half-row_lo = floor_y >> 1
+                --   half-col_hi = (floor_x+1) >> 1, half-row_hi = (floor_y+1) >> 1
+                --   parities determine which of the 4 banks gets which
+                --   (lo, hi) half-column / half-row pair. Then we always
+                --   produce ONE address per bank (so all 4 banks read
+                --   simultaneously).
+                -- Clamp src_y to recently-written-line window (same as v3).
+                v_line_min := cnt_y_w - N_LINES + 1;
+                if v_line_min < 0 then
+                    v_line_min := 0;
+                end if;
+                v_src_y_fin := s11_src_y;
+                if v_src_y_fin > cnt_y_w then
+                    v_src_y_fin := cnt_y_w;
+                elsif v_src_y_fin < v_line_min then
+                    v_src_y_fin := v_line_min;
+                end if;
+                v_src_x_fin := s11_src_x;
+                if v_src_x_fin >= MAX_SRC_W then
+                    v_src_x_fin := MAX_SRC_W - 1;
+                end if;
+                -- floor and floor+1, both clamped to the same legal range
+                -- so a clamp at the right/bottom edge means floor+1 ==
+                -- floor, which still reads from the legal bank (the bilerp
+                -- weight on that neighbour is then irrelevant because fx/fy
+                -- were forced to 0 in stage 11 for the saturating case).
+                v_fx_lo := v_src_x_fin;
+                v_fx_hi := v_src_x_fin + 1;
+                if v_fx_hi > MAX_SRC_W - 1 then v_fx_hi := MAX_SRC_W - 1; end if;
+                v_fy_lo := v_src_y_fin;
+                v_fy_hi := v_src_y_fin + 1;
+                -- Keep fy_hi within the sliding-window upper bound. The
+                -- height clamp was already applied in stage 11 (src_y_pre <
+                -- src_h_latched - 1) so we only need the recently-written
+                -- ceiling here.
+                if v_fy_hi > cnt_y_w then v_fy_hi := cnt_y_w; end if;
+                -- Parities
+                if (v_fx_lo mod 2) = 1 then v_x_lo_p := '1'; else v_x_lo_p := '0'; end if;
+                if (v_fx_hi mod 2) = 1 then v_x_hi_p := '1'; else v_x_hi_p := '0'; end if;
+                if (v_fy_lo mod 2) = 1 then v_y_lo_p := '1'; else v_y_lo_p := '0'; end if;
+                if (v_fy_hi mod 2) = 1 then v_y_hi_p := '1'; else v_y_hi_p := '0'; end if;
+                -- Half coords (within-bank linear index = half_row * HALF_W + half_col,
+                -- with half_row taken mod N_HLINES to give sliding-window behaviour).
+                v_x_lo_h := v_fx_lo / 2;
+                v_x_hi_h := v_fx_hi / 2;
+                v_y_lo_h := (v_fy_lo / 2) mod N_HLINES;
+                v_y_hi_h := (v_fy_hi / 2) mod N_HLINES;
+                -- For each of the 4 banks, pick the (half_col, half_row)
+                -- combination whose parities match. Because (x_lo_p, x_hi_p)
+                -- partition the two x-parity buckets and (y_lo_p, y_hi_p)
+                -- partition the two y-parity buckets, exactly one of the
+                -- 4 (x, y) pairings maps to each bank.
+                if v_x_lo_p = '0' then
+                    -- x_lo is the EVEN-x source, x_hi is the ODD-x source.
+                    if v_y_lo_p = '0' then
+                        v_a_ee := v_y_lo_h * HALF_W + v_x_lo_h;
+                        v_a_eo := v_y_lo_h * HALF_W + v_x_hi_h;
+                        v_a_oe := v_y_hi_h * HALF_W + v_x_lo_h;
+                        v_a_oo := v_y_hi_h * HALF_W + v_x_hi_h;
+                    else
+                        v_a_ee := v_y_hi_h * HALF_W + v_x_lo_h;
+                        v_a_eo := v_y_hi_h * HALF_W + v_x_hi_h;
+                        v_a_oe := v_y_lo_h * HALF_W + v_x_lo_h;
+                        v_a_oo := v_y_lo_h * HALF_W + v_x_hi_h;
+                    end if;
                 else
-                    v_base := BANK_A_BASE;
+                    -- x_lo is the ODD-x source, x_hi is the EVEN-x source.
+                    if v_y_lo_p = '0' then
+                        v_a_ee := v_y_lo_h * HALF_W + v_x_hi_h;
+                        v_a_eo := v_y_lo_h * HALF_W + v_x_lo_h;
+                        v_a_oe := v_y_hi_h * HALF_W + v_x_hi_h;
+                        v_a_oo := v_y_hi_h * HALF_W + v_x_lo_h;
+                    else
+                        v_a_ee := v_y_hi_h * HALF_W + v_x_hi_h;
+                        v_a_eo := v_y_hi_h * HALF_W + v_x_lo_h;
+                        v_a_oe := v_y_lo_h * HALF_W + v_x_hi_h;
+                        v_a_oo := v_y_lo_h * HALF_W + v_x_lo_h;
+                    end if;
                 end if;
-                s12_word_addr <= v_base + s11_src_y * STRIDE_WORDS
-                                 + (s11_src_x / C_PIXELS_PER_WORD);
-                s12_lane <= s11_src_x mod C_PIXELS_PER_WORD;
-                src_x_now <= s11_src_x;
-                src_y_now <= s11_src_y;
-                read_active <= side_pipe(N_WARP_STAGES - 1).v_in_act;
+                s12_addr_ee <= v_a_ee;
+                s12_addr_eo <= v_a_eo;
+                s12_addr_oe <= v_a_oe;
+                s12_addr_oo <= v_a_oo;
+                s12_fx  <= s11_fx;
+                s12_fy  <= s11_fy;
+                s12_fxp <= v_x_lo_p;
+                s12_fyp <= v_y_lo_p;
+                s12_hs <= side_pipe(N_WARP_STAGES).hs;
+                s12_vs <= side_pipe(N_WARP_STAGES).vs;
+                s12_de <= side_pipe(N_WARP_STAGES).de;
+                s12_bilinear <= bilinear_en;
 
-                -- ====================================================
-                -- After warp pipeline + word_addr stage: feed pipe(0).
-                -- side_pipe(N_WARP_STAGES) is one cycle further than
-                -- s12_* (extra stage of pipeline for word_addr), so
-                -- the indices align: both reflect cycle T-N_WARP_STAGES.
-                -- ====================================================
-                rd_word_addr <= s12_word_addr;
+                -- Stage 13: route bank reads to (p00, p01, p10, p11) based
+                -- on floor parities, and carry fx/fy/sync/bilinear_en. The
+                -- raw bank outputs (s13_q_*) come from the pixel-bank
+                -- single-process block below.
+                --
+                -- p00 = pixel at (floor_x,   floor_y)
+                -- p01 = pixel at (floor_x+1, floor_y)
+                -- p10 = pixel at (floor_x,   floor_y+1)
+                -- p11 = pixel at (floor_x+1, floor_y+1)
+                --
+                -- The bank for each is determined by the parity bits
+                -- s12_fxp (=floor_x[0]) and s12_fyp (=floor_y[0]).
+                v_parity_sel := s12_fyp & s12_fxp;
+                case v_parity_sel is
+                    when "00" =>
+                        -- floor parity (even, even)
+                        s13_p00 <= s13_q_ee;
+                        s13_p01 <= s13_q_eo;
+                        s13_p10 <= s13_q_oe;
+                        s13_p11 <= s13_q_oo;
+                    when "01" =>
+                        -- floor parity (even-y, odd-x)
+                        s13_p00 <= s13_q_eo;
+                        s13_p01 <= s13_q_ee;
+                        s13_p10 <= s13_q_oo;
+                        s13_p11 <= s13_q_oe;
+                    when "10" =>
+                        -- floor parity (odd-y, even-x)
+                        s13_p00 <= s13_q_oe;
+                        s13_p01 <= s13_q_oo;
+                        s13_p10 <= s13_q_ee;
+                        s13_p11 <= s13_q_eo;
+                    when others =>  -- "11"
+                        -- floor parity (odd, odd)
+                        s13_p00 <= s13_q_oo;
+                        s13_p01 <= s13_q_oe;
+                        s13_p10 <= s13_q_eo;
+                        s13_p11 <= s13_q_ee;
+                end case;
+                s13_fx    <= s12_fx;
+                s13_fy    <= s12_fy;
+                s13_hs    <= s12_hs;
+                s13_vs    <= s12_vs;
+                s13_de    <= s12_de;
+                s13_bilinear <= s12_bilinear;
 
-                -- Shift the DDR3-alignment pipe (unchanged from move 5a).
-                for i in pipe'high downto 1 loop
-                    pipe(i) <= pipe(i - 1);
-                end loop;
-                pipe(0).lane <= s12_lane;
-                pipe(0).hs   <= side_pipe(N_WARP_STAGES).hs;
-                pipe(0).vs   <= side_pipe(N_WARP_STAGES).vs;
-                pipe(0).de   <= side_pipe(N_WARP_STAGES).de;
-                if side_pipe(N_WARP_STAGES).v_in_act = '1' and (wr_pending = '0') then
-                    pipe(0).rd_en <= '1';
-                    read_reg      <= '1';
+                -- Stage 14: horizontal lerp.
+                v_one_minus_fx := to_unsigned(256, 9) - resize(s13_fx, 9);
+                s14_top_r <= unsigned(s13_p00(23 downto 16)) * v_one_minus_fx
+                           + unsigned(s13_p01(23 downto 16)) * resize(s13_fx, 9);
+                s14_top_g <= unsigned(s13_p00(15 downto  8)) * v_one_minus_fx
+                           + unsigned(s13_p01(15 downto  8)) * resize(s13_fx, 9);
+                s14_top_b <= unsigned(s13_p00( 7 downto  0)) * v_one_minus_fx
+                           + unsigned(s13_p01( 7 downto  0)) * resize(s13_fx, 9);
+                s14_bot_r <= unsigned(s13_p10(23 downto 16)) * v_one_minus_fx
+                           + unsigned(s13_p11(23 downto 16)) * resize(s13_fx, 9);
+                s14_bot_g <= unsigned(s13_p10(15 downto  8)) * v_one_minus_fx
+                           + unsigned(s13_p11(15 downto  8)) * resize(s13_fx, 9);
+                s14_bot_b <= unsigned(s13_p10( 7 downto  0)) * v_one_minus_fx
+                           + unsigned(s13_p11( 7 downto  0)) * resize(s13_fx, 9);
+                s14_fy        <= s13_fy;
+                s14_hs        <= s13_hs;
+                s14_vs        <= s13_vs;
+                s14_de        <= s13_de;
+                s14_bilinear  <= s13_bilinear;
+                s14_p00       <= s13_p00;
+
+                -- Stage 15: vertical lerp.
+                -- top_<c> and bot_<c> are sums of (8-bit pixel) * (9-bit weight)
+                -- with the two weights summing to 256 → result is at most
+                -- 255 * 256 = 65280 (fits in 16 bits, but we declared 17 for
+                -- headroom). Multiplying by another 9-bit weight gives up to
+                -- 65280 * 256 = ~16.7M → fits in 24 bits. We use 26-bit
+                -- accumulators for the sum of two such products.
+                v_one_minus_fy := to_unsigned(256, 9) - resize(s14_fy, 9);
+                s15_r25 <= s14_top_r * v_one_minus_fy + s14_bot_r * resize(s14_fy, 9);
+                s15_g25 <= s14_top_g * v_one_minus_fy + s14_bot_g * resize(s14_fy, 9);
+                s15_b25 <= s14_top_b * v_one_minus_fy + s14_bot_b * resize(s14_fy, 9);
+                s15_hs       <= s14_hs;
+                s15_vs       <= s14_vs;
+                s15_de       <= s14_de;
+                s15_bilinear <= s14_bilinear;
+                s15_p00      <= s14_p00;
+
+                -- Stage 16: emit. Mux bilinear vs NN. Bilinear takes the
+                -- top 8 bits of each channel's 26-bit accumulator (i.e.
+                -- the [23:16] slice — equivalent to >>16 after the two
+                -- 8-bit weight multiplies).
+                if s15_bilinear = '1' then
+                    s16_pixel <= std_logic_vector(s15_r25(23 downto 16))
+                               & std_logic_vector(s15_g25(23 downto 16))
+                               & std_logic_vector(s15_b25(23 downto 16));
                 else
-                    pipe(0).rd_en <= '0';
-                    read_reg      <= '0';
+                    s16_pixel <= s15_p00;
                 end if;
+                s16_hs <= s15_hs;
+                s16_vs <= s15_vs;
+                s16_de <= s15_de;
             end if;
         end if;
     end process;
 
     -- ============================================================
-    -- Avalon master arbitration: writes have priority. Pure
-    -- concurrent (combinational) muxing of the master signals so a
-    -- write that fires this cycle preempts the read.
+    -- Pixel banks (4-way split for single-cycle bilinear fetch)
     -- ============================================================
-    -- read_fire kept around for diagnostic naming; equals read_reg.
-    read_fire <= read_reg;
+    -- Each of the 4 banks gets its OWN process with one write port and one
+    -- read port — Quartus's canonical simple-dual-port-RAM template. The
+    -- write enable for each bank is gated on the (cnt_y_w[0], cnt_x_w[0])
+    -- parities so each incoming pixel writes to exactly one bank.
+    --
+    -- Within-bank write address:
+    --   wr_addr = ((cnt_y_w / 2) mod N_HLINES) * HALF_W + (cnt_x_w / 2)
+    --
+    -- Read address comes from stage 12 per bank (s12_addr_*). Read data
+    -- registers into s13_q_* (1-cycle M10K read latency).
+    --
+    -- The single ce_pix gating + simple write-then-read structure of each
+    -- process keeps the RAM inference unambiguous. We do NOT read+write
+    -- the same address in the same cycle for "old" data (Quartus's
+    -- default M10K dual-port behaviour with read-during-write is "don't
+    -- care" but we never bilerp from a half-row that's currently being
+    -- written because s11/s12 clamps src_y to <= cnt_y_w, and even at
+    -- cnt_y_w the write happens at cnt_x_w which is not the read pos).
+    -- ============================================================
 
-    avl_address    <= std_logic_vector(
-                          to_unsigned(wr_addr_word * (2 ** ADDR_BYTE_SHIFT), AW))
-                      when wr_pending = '1'
-                      else std_logic_vector(
-                          to_unsigned(rd_word_addr * (2 ** ADDR_BYTE_SHIFT), AW));
-    avl_burstcount <= std_logic_vector(to_unsigned(1, BCW));
-    avl_write      <= wr_pending;
-    avl_read       <= read_reg;
-    avl_writedata  <= wr_data;
-    avl_byteenable <= (others => '1');
+    -- Bank pb_ee: y even, x even
+    process(clk)
+        variable v_wr_addr : integer range 0 to BANK_DEPTH - 1;
+    begin
+        if rising_edge(clk) then
+            if ce_pix = '1' then
+                if de_in = '1' and vs_rising = '0' and de_falling = '0'
+                   and cnt_x_w < MAX_SRC_W
+                   and (cnt_y_w mod 2) = 0 and (cnt_x_w mod 2) = 0 then
+                    v_wr_addr := ((cnt_y_w / 2) mod N_HLINES) * HALF_W
+                               + (cnt_x_w / 2);
+                    pb_ee(v_wr_addr) <= r_in & g_in & b_in;
+                end if;
+                s13_q_ee <= pb_ee(s12_addr_ee);
+            end if;
+        end if;
+    end process;
+
+    -- Bank pb_eo: y even, x odd
+    process(clk)
+        variable v_wr_addr : integer range 0 to BANK_DEPTH - 1;
+    begin
+        if rising_edge(clk) then
+            if ce_pix = '1' then
+                if de_in = '1' and vs_rising = '0' and de_falling = '0'
+                   and cnt_x_w < MAX_SRC_W
+                   and (cnt_y_w mod 2) = 0 and (cnt_x_w mod 2) = 1 then
+                    v_wr_addr := ((cnt_y_w / 2) mod N_HLINES) * HALF_W
+                               + (cnt_x_w / 2);
+                    pb_eo(v_wr_addr) <= r_in & g_in & b_in;
+                end if;
+                s13_q_eo <= pb_eo(s12_addr_eo);
+            end if;
+        end if;
+    end process;
+
+    -- Bank pb_oe: y odd, x even
+    process(clk)
+        variable v_wr_addr : integer range 0 to BANK_DEPTH - 1;
+    begin
+        if rising_edge(clk) then
+            if ce_pix = '1' then
+                if de_in = '1' and vs_rising = '0' and de_falling = '0'
+                   and cnt_x_w < MAX_SRC_W
+                   and (cnt_y_w mod 2) = 1 and (cnt_x_w mod 2) = 0 then
+                    v_wr_addr := ((cnt_y_w / 2) mod N_HLINES) * HALF_W
+                               + (cnt_x_w / 2);
+                    pb_oe(v_wr_addr) <= r_in & g_in & b_in;
+                end if;
+                s13_q_oe <= pb_oe(s12_addr_oe);
+            end if;
+        end if;
+    end process;
+
+    -- Bank pb_oo: y odd, x odd
+    process(clk)
+        variable v_wr_addr : integer range 0 to BANK_DEPTH - 1;
+    begin
+        if rising_edge(clk) then
+            if ce_pix = '1' then
+                if de_in = '1' and vs_rising = '0' and de_falling = '0'
+                   and cnt_x_w < MAX_SRC_W
+                   and (cnt_y_w mod 2) = 1 and (cnt_x_w mod 2) = 1 then
+                    v_wr_addr := ((cnt_y_w / 2) mod N_HLINES) * HALF_W
+                               + (cnt_x_w / 2);
+                    pb_oo(v_wr_addr) <= r_in & g_in & b_in;
+                end if;
+                s13_q_oo <= pb_oo(s12_addr_oo);
+            end if;
+        end if;
+    end process;
+
+    -- s13_pixel: legacy NN signal kept only for SignalTap traceability.
+    -- Driven combinationally from the s13_p00 mux output.
+    s13_pixel <= s13_p00;
 
     -- ============================================================
-    -- Data emitter: align readdata with the pipe tail.
+    -- Output emitter: drive r/g/b/hs/vs/de from stage-16 registers
+    -- (v3.1: s16 is the bilinear-or-NN muxed pixel; sync carries through
+    -- s13 → s14 → s15 → s16 alongside the pixel data so all four arrive
+    -- aligned). Black-out (output 0) when de='0'.
     -- ============================================================
     process(clk)
-        variable v_lane : integer range 0 to 3;
     begin
         if rising_edge(clk) then
             if reset = '1' then
-                dout       <= (others => '0');
-                de_out     <= '0';
-                hs_out     <= '0';
-                vs_out     <= '0';
-                ce_pix_out <= '0';
-            else
-                if pipe(pipe'high).rd_en = '1' and avl_readdatavalid = '1' then
-                    v_lane := pipe(pipe'high).lane;
-                    dout       <= unpack_pix(avl_readdata, v_lane);
-                    ce_pix_out <= '1';
+                r_out  <= (others => '0');
+                g_out  <= (others => '0');
+                b_out  <= (others => '0');
+                hs_out <= '0';
+                vs_out <= '0';
+                de_out <= '0';
+            elsif ce_pix = '1' then
+                if s16_de = '1' then
+                    r_out <= s16_pixel(23 downto 16);
+                    g_out <= s16_pixel(15 downto 8);
+                    b_out <= s16_pixel(7 downto 0);
                 else
-                    dout       <= (others => '0');
-                    ce_pix_out <= '0';
+                    r_out <= (others => '0');
+                    g_out <= (others => '0');
+                    b_out <= (others => '0');
                 end if;
-                de_out <= pipe(pipe'high).de;
-                hs_out <= pipe(pipe'high).hs;
-                vs_out <= pipe(pipe'high).vs;
+                hs_out <= s16_hs;
+                vs_out <= s16_vs;
+                de_out <= s16_de;
             end if;
         end if;
     end process;

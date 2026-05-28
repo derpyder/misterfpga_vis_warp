@@ -61,6 +61,7 @@ localparam CONF_STR = {
 	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"O[2],TV Mode,NTSC,PAL;",
 	"O[4:3],Noise,White,Red,Green,Blue;",
+	"O[13:11],Pattern,Cosine,Grid,VBars,Gradient,Crosshair,Gray50,Black,White;",
 	"-;",
 	"P1,Test Page 1;",
 	"P1-;",
@@ -132,9 +133,10 @@ mycore mycore
 (
 	.clk(clk_sys),
 	.reset(reset),
-	
+
 	.pal(status[2]),
 	.scandouble(forced_scandoubler),
+	.pattern(status[13:11]),         // SPEC-vis_warp-v3 task #6: test-pattern selector
 
 	.ce_pix(ce_pix),
 
