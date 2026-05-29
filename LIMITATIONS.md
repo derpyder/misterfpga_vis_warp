@@ -10,31 +10,21 @@ project.
 
 ## Hard limits today
 
-### 0. Top-of-frame asymmetric warp (v3.2 release)
+### 0. Top-of-frame asymmetric warp — ✅ FIXED (v3.3c)
 
-**The single most visible limitation.** The first ~20–30% of each frame's
-vertical extent shows asymmetric/stale-buffer content because vis_warp's
-M9K sliding-window pixel buffer doesn't "look ahead" of the output
-cursor at the top of frames.
+*(Historical — this WAS the single most visible limitation; it's resolved.)*
 
-Manifests as:
-- **Galaga**: score area at top of screen is noisy or shows previous-frame artifacts; gameplay area below score is clean
-- **Pac-Man** (vertical orientation): top score strip degraded
-- **Any core with HUD at top of screen**: affected
-- **Attract mode title text**: often unreadable at the very top
+Through v3.2 the warp only looked right on the bottom ~70% of the frame;
+the top showed stale-buffer/asymmetric content, because the M9K sliding-
+window had no lookahead. Two attempts to fix it failed (v3.3 counter FSM
+→ 1 fps; v3.3b FIFO judged only on rotation-confounded Galaga). The
+postmortem of that fight is preserved at
+[`POSTMORTEM-v3.3-sync-delay-2026-05-28.md`](./POSTMORTEM-v3.3-sync-delay-2026-05-28.md).
 
-Mitigation today:
-- Lower curvature (k=1 instead of k=2) reduces the artifact area by
-  reducing how much corner-pull happens
-- Bottom 70% of frame renders correctly and shows the proper warped image
-
-**Proper fix**: implement N_LINES/2 line lookahead sync delay so the
-writer leads the reader. We attempted this twice (v3.3 counter FSM,
-v3.3b FIFO) — both failed empirically. See
-[`POSTMORTEM-v3.3-sync-delay-2026-05-28.md`](./POSTMORTEM-v3.3-sync-delay-2026-05-28.md)
-for the full debugging history and pre-emptive guidance for anyone
-attempting a v3.4 retry. Bottom line: it's harder than it looks; needs
-proper simulation + SignalTap setup before any RTL changes.
+**Resolved in v3.3c by the self-tuning sync-delay**: the engine measures
+the core's line period and sets the writer-lead to N_LINES/2 lines
+automatically, giving bidirectional lookahead with no per-core constant.
+Validated symmetric top-to-bottom on Template and on Robotron hardware.
 
 ### 1. Per-core opt-in requires recompile
 
@@ -110,6 +100,34 @@ not guaranteed.
 ---
 
 ## Soft limits / visual quality
+
+### A. A warp is a resample — it is NOT bit-for-bit pixel-perfect
+
+This is the honest headline, and it's why an early README claim of
+"pixel-perfect output" was wrong (now corrected). vis_warp geometrically
+displaces pixels; any output pixel whose warped source coordinate isn't
+exactly on a source-pixel center must be **interpolated**. There is no
+warp that is also bit-exact — that's true of every CRT-curvature effect,
+shader or FPGA.
+
+What you CAN control is how soft that resample looks:
+
+- **Sharp-bilinear (default, v3.3d).** The blend fraction is steepened
+  (`SHARP_K` in `vis_warp_v2_wp.vhd`, default 2) so pixels snap to their
+  nearest source pixel and only a thin band at pixel boundaries blends.
+  Crisp pixels, smooth curves. Raise `SHARP_K` (3–4) for sharper / lower
+  (1) for the old soft bilinear.
+- **SCALE_PREWARP makes it global, not just edges.** The ~1.18× source
+  zoom (k=2) that fills the frame means the whole image is resampled at a
+  non-integer ratio, so without sharpening the *entire* picture softens,
+  not only the curved regions. Sharp-bilinear is what rescues that.
+- **Downstream still matters.** Keep ascal in **integer/NN** mode for the
+  crispest result (the warped source-res frame is replicated block-for-
+  block). A polyphase ascal filter will re-soften on top.
+
+If you compared a warped frame to a non-warped integer scale and saw
+"fuzzy," that's the resample — real, expected, and now minimized by
+sharp-bilinear rather than denied.
 
 ### 6. Bilinear quality is bounded by source resolution
 

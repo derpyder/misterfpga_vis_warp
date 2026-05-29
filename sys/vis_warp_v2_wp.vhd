@@ -174,6 +174,14 @@ architecture rtl of vis_warp_v2_wp is
     constant LINE_LEN_MAX       : integer := 1023;  -- cap so (N/2)*line_len < DEPTH (1023*64=65472)
     constant LINE_LEN_MIN       : integer := 64;    -- ignore implausibly short lines (hs glitch)
 
+    -- v3.3d SHARP-BILINEAR: steepen the bilinear blend fraction so pixels
+    -- snap to their nearest source pixel (crisp) except a thin transition
+    -- band at pixel boundaries (keeps curves smooth, kills the global
+    -- resample fuzz). SHARP_K=1 → pure bilinear (soft); higher → sharper
+    -- (→ nearest-neighbor as K→∞). K=2 = classic sharp-bilinear (½-pixel
+    -- transition); K=3 sharper (⅓-pixel). Tune to taste.
+    constant SHARP_K            : integer := 2;
+
     type sync_fifo_t is array (0 to SYNC_FIFO_DEPTH - 1) of std_logic_vector(3 downto 0);
     signal sync_fifo        : sync_fifo_t;   -- {hs,vs,de,ce_pix} -- NO init/reset → M9K
     signal sync_fifo_out    : std_logic_vector(3 downto 0) := (others => '0');
@@ -584,6 +592,9 @@ begin
         variable v_one_minus_fx : unsigned(8 downto 0);
         -- Stage 15 lerp scratch:
         variable v_one_minus_fy : unsigned(8 downto 0);
+        -- Sharp-bilinear: sharpened blend fractions + integer intermediates.
+        variable v_fx_s, v_fy_s   : unsigned(7 downto 0);
+        variable v_fxs_i, v_fys_i : integer;
     begin
         if rising_edge(clk) then
             if reset = '1' then
@@ -789,11 +800,24 @@ begin
                     v_src_x_id := 0;
                     v_src_y_id := 0;
                 end if;
+                -- SHARP-BILINEAR: steepen the fraction about its midpoint
+                -- (0.5 = 128) so it snaps toward 0 or 1 except a thin band.
+                --   fx_sharp = clamp(SHARP_K*(fx-128) + 128, 0, 255)
+                -- SHARP_K=1 leaves it pure bilinear; >1 sharpens toward NN.
+                v_fxs_i := SHARP_K * (to_integer(v_fx_u) - 128) + 128;
+                if    v_fxs_i < 0   then v_fx_s := (others => '0');
+                elsif v_fxs_i > 255 then v_fx_s := (others => '1');
+                else  v_fx_s := to_unsigned(v_fxs_i, 8); end if;
+                v_fys_i := SHARP_K * (to_integer(v_fy_u) - 128) + 128;
+                if    v_fys_i < 0   then v_fy_s := (others => '0');
+                elsif v_fys_i > 255 then v_fy_s := (others => '1');
+                else  v_fy_s := to_unsigned(v_fys_i, 8); end if;
+
                 if side_pipe(14).warp_en = '1' then
                     s11_src_x <= v_src_x_pre;
                     s11_src_y <= v_src_y_pre;
-                    s11_fx    <= v_fx_u;
-                    s11_fy    <= v_fy_u;
+                    s11_fx    <= v_fx_s;
+                    s11_fy    <= v_fy_s;
                 else
                     s11_src_x <= v_src_x_id;
                     s11_src_y <= v_src_y_id;

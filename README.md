@@ -1,9 +1,17 @@
 # vis_warp — Games with curved options
 
 A framework-level barrel-distortion video processor for the MiSTer FPGA
-platform. Brings CRT-style screen curvature to arcade and console cores
-**without sacrificing integer scaling, OSD readability, or pixel-perfect
-output** — because the warp lives upstream of the scaler, not downstream.
+platform. Brings CRT-style screen curvature to arcade and console cores —
+the warp lives **upstream of the scaler**, so your OSD stays straight, your
+integer-scaling and shadowmask/scanline setup still apply, and the bow
+scales naturally with whatever HDMI mode you run.
+
+> **On sharpness:** a geometric warp is, by definition, a *resample* — it is
+> not bit-for-bit pixel-perfect (any honest CRT-curvature effect resamples).
+> vis_warp's sampling is sharpness-tunable: **sharp-bilinear** keeps pixels
+> crisp (nearest-neighbor snap with a thin transition band) while keeping
+> the curve smooth. Pair with ascal in integer/NN mode for the sharpest
+> result. See [`LIMITATIONS.md`](./LIMITATIONS.md) for the honest tradeoff.
 
 ```
 status:  alpha (v3.3c — symmetry validated, self-tuning, first consumer core shipped)
