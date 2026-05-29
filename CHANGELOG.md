@@ -1,5 +1,32 @@
 # Changelog
 
+## v3.3c — Self-tuning sync-delay + first validated consumer core (2026-05-28)
+
+The milestone: **symmetric barrel validated on a real arcade core
+(Robotron), on hardware, via a mechanical adoption pipeline.**
+
+- **Self-tuning sync-delay.** The FIFO writer-lead is no longer a
+  hardcoded cycle count tuned for one htotal. The engine measures the
+  core's line period (clk cycles between hs_in rising edges → `line_len`)
+  and sets `target_lag = (N_LINES/2) × line_len`, so the read trails the
+  write by exactly ~N_LINES/2 *lines* on ANY core. `rd_ptr` tracks
+  `wr_ptr − target_lag`. This removes the one per-core manual step —
+  arbitrary cores now adopt the template with no magic constant. THIS is
+  what makes the core-adoption pipeline real.
+- **Validated on hardware:** Template mycore (regression — still
+  symmetric) AND `Arcade-Robotron_MiSTer` (symmetric barrel across native
+  4:3, first honest build). Self-tuning generalized from dev rig to a
+  real consumer core.
+- **`ADOPTING-A-CORE.md`** added — the repeatable pipeline: static-read
+  candidacy check (live-input vs rotated), vendor 4 files, 3 identical
+  sys_top edits, macro, build. No line-timing constant.
+- Williams multi-core means Robotron-VIS also covers Joust/Stargate/
+  Bubbles/Splat/Alien★ar (all `landscape=1`).
+
+Notes: HDMI wants the front-end scandoubler OFF (ascal scales the warped
+native; scandoubler-on feeds doubled lines that resolution-gate the bow).
+Twin-stick control mapping is stock-core, not vis_warp (video-path only).
+
 ## v3.2 — SCALE_PREWARP (shipping alpha, 2026-05-28)
 
 Adds curvature-keyed pre-warp scale factor so the barrel-warped output

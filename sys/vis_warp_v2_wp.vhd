@@ -157,20 +157,34 @@ architecture rtl of vis_warp_v2_wp is
     -- behind wr_ptr, so the popped sync (hs_o_gen/vs_o_gen/de_o_gen/
     -- ce_pix_dly) trails the input by N_LINES/2 source lines.
     --
-    -- SYNC_FIFO_LATENCY = N_LINES/2 * MAX_HTOTAL = 64 * 768 = 49152.
-    -- rd_ptr init = DEPTH - LATENCY = 65536 - 49152 = 16384, which keeps
-    -- both pointers inside [0, 65535] and makes wr lead rd by exactly
-    -- 49152 (mod 65536) from cycle 0 onward.
-    constant MAX_HTOTAL         : integer := 768;   -- max source HTotal
+    -- v3.3c SELF-TUNING (2026-05-28): the writer-lead must be ~N_LINES/2
+    -- *lines* regardless of the core's line period — that is what lets an
+    -- arbitrary core adopt this template cleanly with NO per-core magic
+    -- constant. We measure the line period (clk cycles between hs_in
+    -- rising edges) into line_len, then set target_lag = (N_LINES/2) *
+    -- line_len, and make rd_ptr trail wr_ptr by exactly target_lag. So the
+    -- read is ~N_LINES/2 lines behind the write on ANY htotal.
+    -- The MAX_HTOTAL/LATENCY constants below are now just the FIRST-FRAME
+    -- DEFAULT (used until line_len is measured) and the cap so the lag
+    -- never exceeds the FIFO depth.
+    constant MAX_HTOTAL         : integer := 768;   -- default/cap source HTotal
     constant SYNC_FIFO_DEPTH    : integer := 65536;
-    constant SYNC_FIFO_LATENCY  : integer := (N_LINES / 2) * MAX_HTOTAL;  -- 49152
+    constant SYNC_FIFO_LATENCY  : integer := (N_LINES / 2) * MAX_HTOTAL;  -- 49152 default
     constant SYNC_FIFO_RD_INIT  : integer := SYNC_FIFO_DEPTH - SYNC_FIFO_LATENCY; -- 16384
+    constant LINE_LEN_MAX       : integer := 1023;  -- cap so (N/2)*line_len < DEPTH (1023*64=65472)
+    constant LINE_LEN_MIN       : integer := 64;    -- ignore implausibly short lines (hs glitch)
 
     type sync_fifo_t is array (0 to SYNC_FIFO_DEPTH - 1) of std_logic_vector(3 downto 0);
     signal sync_fifo        : sync_fifo_t;   -- {hs,vs,de,ce_pix} -- NO init/reset → M9K
     signal sync_fifo_out    : std_logic_vector(3 downto 0) := (others => '0');
     signal sync_fifo_wr_ptr : unsigned(15 downto 0) := (others => '0');
     signal sync_fifo_rd_ptr : unsigned(15 downto 0) := to_unsigned(SYNC_FIFO_RD_INIT, 16);
+
+    -- Self-tuning line-period measurement → dynamic FIFO lag.
+    signal line_meas_cnt : unsigned(11 downto 0) := (others => '0');               -- cycles in current line
+    signal line_len      : unsigned(11 downto 0) := to_unsigned(MAX_HTOTAL, 12);   -- measured period (default 768)
+    signal target_lag    : unsigned(15 downto 0) := to_unsigned(SYNC_FIFO_LATENCY, 16); -- = (N/2)*line_len
+    signal hs_in_meas_d  : std_logic := '0';                                       -- hs_in edge detect
 
     -- Delayed sync popped from the FIFO (concurrent slices of sync_fifo_out).
     signal hs_o_gen   : std_logic;
@@ -371,9 +385,10 @@ begin
         end if;
     end process;
 
-    -- (2) Pointer advance — both increment every clk. wr_ptr leads rd_ptr
-    --     by SYNC_FIFO_LATENCY (mod DEPTH) from cycle 0. 16-bit pointers
-    --     wrap naturally at DEPTH=65536, preserving the lead.
+    -- (2) Pointer advance — wr_ptr free-runs; rd_ptr tracks (wr_ptr+1) -
+    --     target_lag so the read is ALWAYS exactly target_lag cycles
+    --     (= N_LINES/2 lines) behind the write, self-correcting whenever
+    --     target_lag updates. 16-bit unsigned subtraction wraps mod 65536.
     process(clk)
     begin
         if rising_edge(clk) then
@@ -382,8 +397,31 @@ begin
                 sync_fifo_rd_ptr <= to_unsigned(SYNC_FIFO_RD_INIT, 16);
             else
                 sync_fifo_wr_ptr <= sync_fifo_wr_ptr + 1;
-                sync_fifo_rd_ptr <= sync_fifo_rd_ptr + 1;
+                sync_fifo_rd_ptr <= (sync_fifo_wr_ptr + 1) - target_lag;
             end if;
+        end if;
+    end process;
+
+    -- (3) SELF-TUNING line-period measurement. Count clk cycles between
+    --     hs_in rising edges → line_len; target_lag = (N_LINES/2)*line_len
+    --     = line_len << 6 (N_LINES/2 = 64). Cap line_len so the lag stays
+    --     inside the FIFO; ignore implausibly short lines (hs glitches).
+    process(clk)
+    begin
+        if rising_edge(clk) then
+            hs_in_meas_d <= hs_in;
+            if hs_in = '1' and hs_in_meas_d = '0' then
+                if line_meas_cnt >= to_unsigned(LINE_LEN_MAX, 12) then
+                    line_len <= to_unsigned(LINE_LEN_MAX, 12);
+                elsif line_meas_cnt >= to_unsigned(LINE_LEN_MIN, 12) then
+                    line_len <= line_meas_cnt;
+                end if;
+                line_meas_cnt <= (others => '0');
+            elsif line_meas_cnt < to_unsigned(LINE_LEN_MAX, 12) then
+                line_meas_cnt <= line_meas_cnt + 1;
+            end if;
+            -- target_lag = line_len * 64  (N_LINES/2). line_len<=1023 → <=65472.
+            target_lag <= shift_left(resize(line_len, 16), 6);
         end if;
     end process;
 
