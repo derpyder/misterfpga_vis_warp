@@ -6,10 +6,24 @@ platform. Brings CRT-style screen curvature to arcade and console cores
 output** — because the warp lives upstream of the scaler, not downstream.
 
 ```
-status:  alpha (v3.1)
+status:  alpha (v3.3c — symmetry validated, self-tuning, first consumer core shipped)
 target:  Terasic DE10-nano (Cyclone V 5CSEBA6)
 quartus: 17.0.2 Lite (free edition)
 ```
+
+## On hardware — Robotron (first validated consumer core)
+
+| Barrel warp | Warp + CRT shadowmask |
+|---|---|
+| ![Robotron title with vis_warp](docs/screenshots/robotron-warp-title.jpg) | ![Robotron + shadowmask](docs/screenshots/robotron-warp-crt-mask.jpg) |
+
+Symmetric barrel across the native 4:3 frame (self-tuning sync-delay), with
+the CRT shadowmask stacked downstream so the mask border curves *with* the
+tube. DE10-nano over HDMI. Full consumer core:
+[`Arcade-Robotron_MiSTer-VIS`](https://github.com/derpyder/Arcade-Robotron_MiSTer-VIS).
+Adoption recipe: [`ADOPTING-A-CORE.md`](./ADOPTING-A-CORE.md).
+
+---
 
 This is a fork of [`MiSTer-devel/Template_MiSTer`](https://github.com/MiSTer-devel/Template_MiSTer)
 with a new framework module added under `sys/`. The fork tracks upstream
