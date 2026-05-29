@@ -109,9 +109,9 @@ architecture wrapper of vis_warp is
     -- LIVE (v3.3d — sharp-bilinear sharpness K), opcode 010 (was bloom).
     -- "001"=K1 soft/pure-bilinear, "010"=K2 default, "011".."111"=sharper
     -- toward nearest-neighbor. v4 OSD "Warp Sharpness" drives this live;
-    -- defaults to 2 until then. Mirrors reg_curvature's runtime-register
+    -- dev-tuned to 4 (sharper) until then. Mirrors reg_curvature's runtime-reg
     -- mechanism exactly.
-    signal reg_sharpness  : std_logic_vector(2 downto 0) := "010";
+    signal reg_sharpness  : std_logic_vector(2 downto 0) := "100";  -- K=4 (dev-tuned sharp)
     -- DEAD-BUT-KEPT (preserve HPS_BUS contract; not consumed by v2):
     signal reg_bloom_en   : std_logic := '0';
     signal reg_scan_en    : std_logic := '0';
