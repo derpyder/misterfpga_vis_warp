@@ -203,10 +203,10 @@ If you want to compile your own vis_warp-enabled core:
    newer framework port shapes.
 4. **Add `MISTER_WARP=1`** to the core's `.qsf` as a `VERILOG_MACRO`
    global assignment.
-5. **Set defaults** in `sys/vis_warp.vhd` (`reg_enable`,
-   `reg_curvature`) — these are the dev-time hardcoded values until v4
-   userland lands. See the inline comments at the top of `vis_warp.vhd`
-   for the per-phase defaults.
+5. **Set defaults** in `sys/vis_warp.vhd`: `reg_curvature` (bow strength) and
+   `reg_sharpness` (sharp-bilinear K — the fuzzy-pixel fix). Build-time defaults
+   until the v4 OSD sliders land; the registers are already runtime-capable.
+   Full 3-bit encoding tables + a tuning tip: **`ADOPTING-A-CORE.md`, Step 5**.
 6. **Compile** in Quartus 17.0.2 Lite. Drop `.rbf` on SD, test.
 
 The Template_MiSTer-VIS dev rig (this repo, with `mycore.v` and

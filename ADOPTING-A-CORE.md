@@ -116,10 +116,45 @@ set_global_assignment -name VERILOG_MACRO "MISTER_WARP=1"
 
 ## Step 5 — Set the warp defaults (until v4 OSD userland)
 
-In `sys/vis_warp.vhd` initializers:
+> **The goal is to expose curvature and sharpness as runtime OSD sliders** — a
+> v4 *Video Processing → Warp* menu in Main_MiSTer (same shape as shadowmask).
+> The RTL registers are **already runtime-capable** (`cmd 0x45`), so v4 is
+> purely C-side UI work — no RTL rework. Until it lands, and because you compile
+> each core yourself, these are **build-time defaults**: edit, recompile, reload.
+> (See [`ROADMAP.md`](./ROADMAP.md) §v4.)
+
+Two knobs, each a 3-bit value in `sys/vis_warp.vhd` (architecture `wrapper`,
+~line 104 and ~line 114). Edit, recompile in Quartus, reload.
+
+**Curvature** — `reg_curvature`, how hard the glass bows:
+
+| value | k | look |
+|-------|---|------|
+| `"000"` | 0 | flat (no bow) |
+| `"010"` | 2 | **tasteful default** (shipped) |
+| `"100"` | 4 | strong |
+| `"111"` | 7 | extreme arcade-tube bow |
+
+**Sharpness** — `reg_sharpness`, sharp-bilinear K. A warp resamples, so plain
+bilinear looks soft; K snaps toward nearest-neighbor inside a thin transition
+band — crisp pixels, smooth curve:
+
+| value | K | look |
+|-------|---|------|
+| `"001"` | 1 | soft (pure bilinear) |
+| `"010"` | 2 | mild |
+| `"100"` | 4 | **dev-tuned default** — crisp, no staircase |
+| `"111"` | 7 | near nearest-neighbor (sharpest; can stair-step) |
+
+`"000"` → treated as K=1 (`v_k` guards ≥1); `"011"`,`"101"`,`"110"` interpolate
+between the rows. **Tuning:** raise K until diagonals *just* begin to stair-step,
+then back off one. K=4 is the validated sweet spot (Robotron + Template grid).
+
+The initializers:
 ```vhdl
 signal reg_enable    : std_logic := '1';                       -- on
-signal reg_curvature : std_logic_vector(2 downto 0) := "010";  -- k=2 (tasteful)
+signal reg_curvature : std_logic_vector(2 downto 0) := "010";  -- k=2  (bow)
+signal reg_sharpness : std_logic_vector(2 downto 0) := "100";  -- K=4 (sharp)
 signal reg_bilinear  : std_logic := '1';                       -- smooth
 ```
 
