@@ -14,7 +14,7 @@ scales naturally with whatever HDMI mode you run.
 > result. See [`LIMITATIONS.md`](./LIMITATIONS.md) for the honest tradeoff.
 
 ```
-status:  alpha (v3.3c — symmetry validated, self-tuning, first consumer core shipped)
+status:  alpha (v3.3d — symmetry + sharp-bilinear validated; first consumer core shipped)
 target:  Terasic DE10-nano (Cyclone V 5CSEBA6)
 quartus: 17.0.2 Lite (free edition)
 ```
@@ -38,6 +38,20 @@ Copy the `.rbf` to `_Arcade/cores/`, the `(vis_warp).mra` files to
 Full consumer core + install guide:
 [`Arcade-Robotron_MiSTer-VIS`](https://github.com/derpyder/Arcade-Robotron_MiSTer-VIS).
 Adopt your own core: [`ADOPTING-A-CORE.md`](./ADOPTING-A-CORE.md).
+
+### Tunable controls
+
+Runtime parameters live as `cmd 0x45` registers (CDC-synced, OSD-driven in
+v4 — global Video Processing menu, like shadowmask, *not* per-core CONF_STR):
+
+- **Enable** · **Curvature** (k=0–7) · **Sharpness** (sharp-bilinear K —
+  nearest-neighbor snap with a thin transition band; crisp pixels, smooth
+  curve) — all wired today, defaulting until the v4 OSD sliders land.
+- **Coming** (specs in [`EFFECTS-BACKLOG.md`](./EFFECTS-BACKLOG.md)): overscan/
+  zoom, vignette, corner-rounding (Tier 1, cheap); H/V curvature, pincushion,
+  warped scanlines (Tier 2); **bloom** (flagship, source-res phosphor glow).
+  All ride on geometry the warp already computes; none duplicate MiSTer's
+  downstream mask/scanline/gamma stack — they stack on top.
 
 ### Dev rig — the grid test pattern that proves it
 

@@ -1,5 +1,29 @@
 # Changelog
 
+## v3.3d — Sharp-bilinear + runtime sharpness control + honest docs (2026-05-28)
+
+Answers a community call-out ("fuzzy pixels" / README overclaimed
+"pixel-perfect") with a real fix and honest docs.
+
+- **Sharp-bilinear.** The bilinear blend fraction is steepened about its
+  midpoint so pixels snap to their nearest source pixel (crisp) except a
+  thin transition band at boundaries — kills the global softening from
+  SCALE_PREWARP's non-integer resample while keeping curves smooth.
+- **Sharpness (K) is a runtime register** — `reg_sharpness`, `cmd 0x45`
+  opcode 010, CDC-synced, plumbed to the engine, mirroring `reg_curvature`
+  exactly. Default K=2. **OSD-ready**: v4 adds a "Warp Sharpness" slider
+  (Soft … Sharpest) on every core via the same path shadowmask uses.
+- **Honest docs.** Dropped the false "pixel-perfect output" claim (a warp
+  is a resample — it can't be bit-exact; corrected README + new
+  LIMITATIONS "A warp is a resample" section). Marked the top-of-frame
+  asymmetry RESOLVED (self-tuning sync-delay).
+- **`EFFECTS-BACKLOG.md`** added — engineering specs for the next tunable
+  effects (Tier 1: overscan, vignette, corner-rounding; Tier 2: H/V
+  curvature, pincushion, warped scanlines; Flagship: bloom).
+
+Validates on Template at default K=2 (look unchanged); tune `reg_sharpness`
+default to find the shipping K, then re-cut consumer rbfs.
+
 ## v3.3c — Self-tuning sync-delay + first validated consumer core (2026-05-28)
 
 The milestone: **symmetric barrel validated on a real arcade core
