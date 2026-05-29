@@ -10,6 +10,32 @@ project.
 
 ## Hard limits today
 
+### 0. Top-of-frame asymmetric warp (v3.2 release)
+
+**The single most visible limitation.** The first ~20–30% of each frame's
+vertical extent shows asymmetric/stale-buffer content because vis_warp's
+M9K sliding-window pixel buffer doesn't "look ahead" of the output
+cursor at the top of frames.
+
+Manifests as:
+- **Galaga**: score area at top of screen is noisy or shows previous-frame artifacts; gameplay area below score is clean
+- **Pac-Man** (vertical orientation): top score strip degraded
+- **Any core with HUD at top of screen**: affected
+- **Attract mode title text**: often unreadable at the very top
+
+Mitigation today:
+- Lower curvature (k=1 instead of k=2) reduces the artifact area by
+  reducing how much corner-pull happens
+- Bottom 70% of frame renders correctly and shows the proper warped image
+
+**Proper fix**: implement N_LINES/2 line lookahead sync delay so the
+writer leads the reader. We attempted this twice (v3.3 counter FSM,
+v3.3b FIFO) — both failed empirically. See
+[`POSTMORTEM-v3.3-sync-delay-2026-05-28.md`](./POSTMORTEM-v3.3-sync-delay-2026-05-28.md)
+for the full debugging history and pre-emptive guidance for anyone
+attempting a v3.4 retry. Bottom line: it's harder than it looks; needs
+proper simulation + SignalTap setup before any RTL changes.
+
 ### 1. Per-core opt-in requires recompile
 
 vis_warp lives in framework `sys/` files that get **vendored into each

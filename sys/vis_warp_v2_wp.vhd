@@ -141,15 +141,55 @@ architecture rtl of vis_warp_v2_wp is
     signal cnt_x_w : integer range 0 to MAX_SRC_W := 0;
     signal cnt_y_w : integer range 0 to 4095      := 0;
 
-    -- ---- Output read cursor (no delay in v1 — same as input cursor) ----
-    -- In v1 the output raster is identical to input raster. The buffer's
-    -- "most recently captured line" is the line of the input pixel
-    -- currently being processed; we clamp src_y to [cnt_y_w - N_LINES + 1,
-    -- cnt_y_w] so the warp can't pull from yet-to-be-written lines.
+    -- ============================================================
+    -- v3.3b: SYNC-DELAY FIFO  (re-created 2026-05-28)
+    -- ============================================================
+    -- Delays the OUTPUT raster by ~N_LINES/2 source lines so the writer
+    -- LEADS the reader. With the buffer always holding ~±N_LINES/2 lines
+    -- around the output line, the warp gets bidirectional lookahead and
+    -- the top-of-frame asymmetry (warp pulling stale/garbage forward
+    -- lines) goes away.
     --
-    -- (v2 will add N/2-line output delay so the warp can pull from
-    -- future-relative-to-output lines, fixing the weak-bow-at-top-edge
-    -- artifact. v1 ships first.)
+    -- Mechanism: a 65536 × 4-bit simple-dual-port RAM (target: M9K/M10K
+    -- inference, Quartus canonical template) carries {hs,vs,de,ce_pix}.
+    -- We write the live input sync into wr_ptr and read out a delayed
+    -- copy from rd_ptr every clk. rd_ptr starts SYNC_FIFO_LATENCY cycles
+    -- behind wr_ptr, so the popped sync (hs_o_gen/vs_o_gen/de_o_gen/
+    -- ce_pix_dly) trails the input by N_LINES/2 source lines.
+    --
+    -- SYNC_FIFO_LATENCY = N_LINES/2 * MAX_HTOTAL = 64 * 768 = 49152.
+    -- rd_ptr init = DEPTH - LATENCY = 65536 - 49152 = 16384, which keeps
+    -- both pointers inside [0, 65535] and makes wr lead rd by exactly
+    -- 49152 (mod 65536) from cycle 0 onward.
+    constant MAX_HTOTAL         : integer := 768;   -- max source HTotal
+    constant SYNC_FIFO_DEPTH    : integer := 65536;
+    constant SYNC_FIFO_LATENCY  : integer := (N_LINES / 2) * MAX_HTOTAL;  -- 49152
+    constant SYNC_FIFO_RD_INIT  : integer := SYNC_FIFO_DEPTH - SYNC_FIFO_LATENCY; -- 16384
+
+    type sync_fifo_t is array (0 to SYNC_FIFO_DEPTH - 1) of std_logic_vector(3 downto 0);
+    signal sync_fifo        : sync_fifo_t;   -- {hs,vs,de,ce_pix} -- NO init/reset → M9K
+    signal sync_fifo_out    : std_logic_vector(3 downto 0) := (others => '0');
+    signal sync_fifo_wr_ptr : unsigned(15 downto 0) := (others => '0');
+    signal sync_fifo_rd_ptr : unsigned(15 downto 0) := to_unsigned(SYNC_FIFO_RD_INIT, 16);
+
+    -- Delayed sync popped from the FIFO (concurrent slices of sync_fifo_out).
+    signal hs_o_gen   : std_logic;
+    signal vs_o_gen   : std_logic;
+    signal de_o_gen   : std_logic;
+    signal ce_pix_dly : std_logic;
+
+    -- Edge detect on the DELAYED sync (for the output cursor process).
+    signal vs_o_gen_d  : std_logic := '0';
+    signal de_o_gen_d  : std_logic := '0';
+    signal vs_o_rising : std_logic;
+    signal de_o_falling: std_logic;
+
+    -- ---- Output read cursor (DELAYED by ~N_LINES/2 lines) ----
+    -- Derived from the FIFO-popped sync, mirroring the input write-cursor
+    -- rules but in the delayed domain. cnt_y_o lags cnt_y_w by ~N_LINES/2.
+    -- The warp pipeline + stage-12 buffer-window clamp now key off these.
+    signal cnt_x_o : integer range 0 to MAX_SRC_W := 0;
+    signal cnt_y_o : integer range 0 to 4095      := 0;
 
     -- ============================================================
     -- WARP PIPELINE (salvaged verbatim from prior DDR3 design)
@@ -315,6 +355,79 @@ begin
     de_falling <= '1' when (de_in = '0' and de_in_d = '1') else '0';
 
     -- ============================================================
+    -- v3.3b: SYNC-DELAY FIFO  (simple-dual-port M9K)
+    -- ============================================================
+    -- (1) RAM access — UNCONDITIONAL on clk (no reset on RAM contents,
+    --     NO ce_pix gate). This is the canonical Quartus simple-dual-
+    --     port template: one write port, one read port, both registered.
+    --     Keeping it free of any conditional inference logic ensures it
+    --     maps to M9K/M10K rather than LUTRAM. {hs,vs,de,ce_pix} packed
+    --     MSB→LSB so the concurrent slices below line up bit (3..0).
+    process(clk)
+    begin
+        if rising_edge(clk) then
+            sync_fifo(to_integer(sync_fifo_wr_ptr)) <= hs_in & vs_in & de_in & ce_pix;
+            sync_fifo_out <= sync_fifo(to_integer(sync_fifo_rd_ptr));
+        end if;
+    end process;
+
+    -- (2) Pointer advance — both increment every clk. wr_ptr leads rd_ptr
+    --     by SYNC_FIFO_LATENCY (mod DEPTH) from cycle 0. 16-bit pointers
+    --     wrap naturally at DEPTH=65536, preserving the lead.
+    process(clk)
+    begin
+        if rising_edge(clk) then
+            if reset = '1' then
+                sync_fifo_wr_ptr <= (others => '0');
+                sync_fifo_rd_ptr <= to_unsigned(SYNC_FIFO_RD_INIT, 16);
+            else
+                sync_fifo_wr_ptr <= sync_fifo_wr_ptr + 1;
+                sync_fifo_rd_ptr <= sync_fifo_rd_ptr + 1;
+            end if;
+        end if;
+    end process;
+
+    -- Expose the delayed sync. These trail the input by N_LINES/2 lines.
+    hs_o_gen   <= sync_fifo_out(3);
+    vs_o_gen   <= sync_fifo_out(2);
+    de_o_gen   <= sync_fifo_out(1);
+    ce_pix_dly <= sync_fifo_out(0);
+
+    -- Edge detect on the delayed sync (combinational from _d copies).
+    vs_o_rising  <= '1' when (vs_o_gen = '1' and vs_o_gen_d = '0') else '0';
+    de_o_falling <= '1' when (de_o_gen = '0' and de_o_gen_d = '1') else '0';
+
+    -- ============================================================
+    -- Output read cursor (cnt_x_o / cnt_y_o) from the DELAYED sync.
+    -- ============================================================
+    -- Mirrors the input write-cursor rules, but uses the FIFO-popped
+    -- edges and ce_pix_dly. The result lags cnt_x_w/cnt_y_w by ~N_LINES/2
+    -- source lines, which is exactly the lookahead the warp wants.
+    process(clk)
+    begin
+        if rising_edge(clk) then
+            if reset = '1' then
+                vs_o_gen_d <= '0';
+                de_o_gen_d <= '0';
+                cnt_x_o    <= 0;
+                cnt_y_o    <= 0;
+            elsif ce_pix_dly = '1' then
+                vs_o_gen_d <= vs_o_gen;
+                de_o_gen_d <= de_o_gen;
+                if vs_o_rising = '1' then
+                    cnt_x_o <= 0;
+                    cnt_y_o <= 0;
+                elsif de_o_falling = '1' then
+                    cnt_x_o <= 0;
+                    cnt_y_o <= cnt_y_o + 1;
+                elsif de_o_gen = '1' then
+                    cnt_x_o <= cnt_x_o + 1;
+                end if;
+            end if;
+        end if;
+    end process;
+
+    -- ============================================================
     -- Source-dim auto-detector + input write cursor. All ce_pix-gated.
     -- (pixel_buf writes have moved to the dedicated RAM process below.)
     -- ============================================================
@@ -380,14 +493,16 @@ begin
     end process;
 
     -- ============================================================
-    -- WARP PIPELINE (ce_pix-gated)
+    -- WARP PIPELINE (v3.3b: ce_pix_dly-gated, DELAYED read/output domain)
     -- ============================================================
-    -- Stage 1: register current cycle's (cnt_x_w, cnt_y_w, dx, dy,
-    -- hs_in, vs_in, de_in) into side_pipe(1).
+    -- Stage 1: register current cycle's (cnt_x_o, cnt_y_o, dx, dy,
+    -- hs_o_gen, vs_o_gen, de_o_gen) into side_pipe(1). These are the
+    -- FIFO-delayed output position + sync, so the writer leads the reader.
     -- Stages 2..11: same arithmetic as the prior DDR3-based v2_wp.
     -- Stage 12: compute M10K read address from (src_x, src_y) clamped
-    -- to (src_w_latched, src_h_latched) AND to the most-recently-
-    -- captured line range [cnt_y_w - N_LINES + 1, cnt_y_w].
+    -- to (src_w_latched, src_h_latched) AND to the BIDIRECTIONAL window
+    -- around the delayed output line:
+    --   [cnt_y_o - N_LINES/2 + 1, cnt_y_o + N_LINES/2]  (min floored at 0).
     -- Stage 13: M10K read result (registered by M10K block).
     -- ============================================================
     process(clk)
@@ -408,6 +523,7 @@ begin
         variable v_src_x_fin : integer;
         variable v_src_y_fin : integer;
         variable v_line_min  : integer;
+        variable v_line_max  : integer;
         variable v_rd_addr   : integer;
         -- v3.1 (bilinear) — per-stage scratch:
         variable v_fx_u      : unsigned(7 downto 0);
@@ -481,27 +597,32 @@ begin
                 s15_p00 <= (others => '0');
                 s16_pixel <= (others => '0');
                 s16_hs <= '0'; s16_vs <= '0'; s16_de <= '0';
-            elsif ce_pix = '1' then
-                -- Stage 1 input
-                v_in_act := (de_in = '1');
+            elsif ce_pix_dly = '1' then
+                -- Stage 1 input — DELAYED (read/output) domain.
+                -- v3.3b: the warp renders the DELAYED output position
+                -- (cnt_x_o/cnt_y_o), and the carried sync is the FIFO-
+                -- popped sync (hs_o_gen/vs_o_gen/de_o_gen). The pipeline
+                -- now advances on ce_pix_dly. The write side (cnt_x_w/
+                -- cnt_y_w, bank writes) stays in the input domain.
+                v_in_act := (de_o_gen = '1');
                 v_dst_cx := src_w_latched / 2;
                 v_dst_cy := src_h_latched / 2;
-                v_dx_int := cnt_x_w - v_dst_cx;
-                v_dy_int := cnt_y_w - v_dst_cy;
+                v_dx_int := cnt_x_o - v_dst_cx;
+                v_dy_int := cnt_y_o - v_dst_cy;
 
                 -- side_pipe shift
                 for k in 2 to N_WARP_STAGES loop
                     side_pipe(k) <= side_pipe(k - 1);
                 end loop;
 
-                side_pipe(1).cnt_x_o  <= cnt_x_w;
-                side_pipe(1).cnt_y_o  <= cnt_y_w;
+                side_pipe(1).cnt_x_o  <= cnt_x_o;
+                side_pipe(1).cnt_y_o  <= cnt_y_o;
                 side_pipe(1).dx       <= to_signed(v_dx_int, 16);
                 side_pipe(1).dy       <= to_signed(v_dy_int, 16);
-                side_pipe(1).hs       <= hs_in;
-                side_pipe(1).vs       <= vs_in;
-                side_pipe(1).de       <= de_in;
-                side_pipe(1).v_in_act <= de_in;
+                side_pipe(1).hs       <= hs_o_gen;
+                side_pipe(1).vs       <= vs_o_gen;
+                side_pipe(1).de       <= de_o_gen;
+                side_pipe(1).v_in_act <= de_o_gen;
                 side_pipe(1).warp_en  <= warp_en;
                 side_pipe(1).k        <= curvature_k;
 
@@ -652,14 +773,20 @@ begin
                 --   (lo, hi) half-column / half-row pair. Then we always
                 --   produce ONE address per bank (so all 4 banks read
                 --   simultaneously).
-                -- Clamp src_y to recently-written-line window (same as v3).
-                v_line_min := cnt_y_w - N_LINES + 1;
+                -- v3.3b: clamp src_y to the BIDIRECTIONAL window around the
+                -- DELAYED output line. Because the writer now leads the
+                -- reader by ~N_LINES/2 lines, the buffer holds both ±N_LINES/2
+                -- around cnt_y_o, so the warp can look forward AND backward.
+                --   v_line_min := cnt_y_o - N_LINES/2 + 1   (floored at 0)
+                --   v_line_max := cnt_y_o + N_LINES/2
+                v_line_min := cnt_y_o - (N_LINES / 2) + 1;
                 if v_line_min < 0 then
                     v_line_min := 0;
                 end if;
+                v_line_max := cnt_y_o + (N_LINES / 2);
                 v_src_y_fin := s11_src_y;
-                if v_src_y_fin > cnt_y_w then
-                    v_src_y_fin := cnt_y_w;
+                if v_src_y_fin > v_line_max then
+                    v_src_y_fin := v_line_max;
                 elsif v_src_y_fin < v_line_min then
                     v_src_y_fin := v_line_min;
                 end if;
@@ -679,9 +806,10 @@ begin
                 v_fy_hi := v_src_y_fin + 1;
                 -- Keep fy_hi within the sliding-window upper bound. The
                 -- height clamp was already applied in stage 11 (src_y_pre <
-                -- src_h_latched - 1) so we only need the recently-written
-                -- ceiling here.
-                if v_fy_hi > cnt_y_w then v_fy_hi := cnt_y_w; end if;
+                -- src_h_latched - 1). v3.3b: the ceiling is now the
+                -- bidirectional window top (cnt_y_o + N_LINES/2), not the
+                -- lockstep writer line.
+                if v_fy_hi > v_line_max then v_fy_hi := v_line_max; end if;
                 -- Parities
                 if (v_fx_lo mod 2) = 1 then v_x_lo_p := '1'; else v_x_lo_p := '0'; end if;
                 if (v_fx_hi mod 2) = 1 then v_x_hi_p := '1'; else v_x_hi_p := '0'; end if;
@@ -854,13 +982,14 @@ begin
     -- Read address comes from stage 12 per bank (s12_addr_*). Read data
     -- registers into s13_q_* (1-cycle M10K read latency).
     --
-    -- The single ce_pix gating + simple write-then-read structure of each
-    -- process keeps the RAM inference unambiguous. We do NOT read+write
-    -- the same address in the same cycle for "old" data (Quartus's
-    -- default M10K dual-port behaviour with read-during-write is "don't
-    -- care" but we never bilerp from a half-row that's currently being
-    -- written because s11/s12 clamps src_y to <= cnt_y_w, and even at
-    -- cnt_y_w the write happens at cnt_x_w which is not the read pos).
+    -- v3.3b: the WRITE port stays in the input domain (gated on ce_pix,
+    -- cnt_y_w/cnt_x_w parities — UNCHANGED). The READ port moves to the
+    -- DELAYED domain (gated on ce_pix_dly) so the popped read data aligns
+    -- with the stage-13 muxer, which now runs on ce_pix_dly. Independent
+    -- write/read clock-enables are still a clean simple-dual-port → M9K.
+    -- Read-during-write of the same address is a non-issue here: the
+    -- writer leads the reader by ~N_LINES/2 lines, so the read half-row is
+    -- never the half-row being written this cycle.
     -- ============================================================
 
     -- Bank pb_ee: y even, x even
@@ -868,6 +997,7 @@ begin
         variable v_wr_addr : integer range 0 to BANK_DEPTH - 1;
     begin
         if rising_edge(clk) then
+            -- WRITE port (input domain — unchanged)
             if ce_pix = '1' then
                 if de_in = '1' and vs_rising = '0' and de_falling = '0'
                    and cnt_x_w < MAX_SRC_W
@@ -876,6 +1006,9 @@ begin
                                + (cnt_x_w / 2);
                     pb_ee(v_wr_addr) <= r_in & g_in & b_in;
                 end if;
+            end if;
+            -- READ port (delayed domain — aligns with stage 13 muxer)
+            if ce_pix_dly = '1' then
                 s13_q_ee <= pb_ee(s12_addr_ee);
             end if;
         end if;
@@ -886,6 +1019,7 @@ begin
         variable v_wr_addr : integer range 0 to BANK_DEPTH - 1;
     begin
         if rising_edge(clk) then
+            -- WRITE port (input domain — unchanged)
             if ce_pix = '1' then
                 if de_in = '1' and vs_rising = '0' and de_falling = '0'
                    and cnt_x_w < MAX_SRC_W
@@ -894,6 +1028,9 @@ begin
                                + (cnt_x_w / 2);
                     pb_eo(v_wr_addr) <= r_in & g_in & b_in;
                 end if;
+            end if;
+            -- READ port (delayed domain — aligns with stage 13 muxer)
+            if ce_pix_dly = '1' then
                 s13_q_eo <= pb_eo(s12_addr_eo);
             end if;
         end if;
@@ -904,6 +1041,7 @@ begin
         variable v_wr_addr : integer range 0 to BANK_DEPTH - 1;
     begin
         if rising_edge(clk) then
+            -- WRITE port (input domain — unchanged)
             if ce_pix = '1' then
                 if de_in = '1' and vs_rising = '0' and de_falling = '0'
                    and cnt_x_w < MAX_SRC_W
@@ -912,6 +1050,9 @@ begin
                                + (cnt_x_w / 2);
                     pb_oe(v_wr_addr) <= r_in & g_in & b_in;
                 end if;
+            end if;
+            -- READ port (delayed domain — aligns with stage 13 muxer)
+            if ce_pix_dly = '1' then
                 s13_q_oe <= pb_oe(s12_addr_oe);
             end if;
         end if;
@@ -922,6 +1063,7 @@ begin
         variable v_wr_addr : integer range 0 to BANK_DEPTH - 1;
     begin
         if rising_edge(clk) then
+            -- WRITE port (input domain — unchanged)
             if ce_pix = '1' then
                 if de_in = '1' and vs_rising = '0' and de_falling = '0'
                    and cnt_x_w < MAX_SRC_W
@@ -930,6 +1072,9 @@ begin
                                + (cnt_x_w / 2);
                     pb_oo(v_wr_addr) <= r_in & g_in & b_in;
                 end if;
+            end if;
+            -- READ port (delayed domain — aligns with stage 13 muxer)
+            if ce_pix_dly = '1' then
                 s13_q_oo <= pb_oo(s12_addr_oo);
             end if;
         end if;
@@ -945,6 +1090,12 @@ begin
     -- s13 → s14 → s15 → s16 alongside the pixel data so all four arrive
     -- aligned). Black-out (output 0) when de='0'.
     -- ============================================================
+    -- Real warp emitter restored 2026-05-28 (force-red diagnostic served
+    -- its purpose: proved SITE C output reaches ASCAL on non-rotated cores).
+    -- v3.3b: gated on ce_pix_dly so the output register advances in lockstep
+    -- with the s16_* pipeline tail (which now runs in the delayed domain) and
+    -- the FIFO-popped output sync. NOTE: downstream ASCAL must be clocked by
+    -- the same delayed pixel-enable (ce_pix_dly) — a sys_top wiring concern.
     process(clk)
     begin
         if rising_edge(clk) then
@@ -955,7 +1106,7 @@ begin
                 hs_out <= '0';
                 vs_out <= '0';
                 de_out <= '0';
-            elsif ce_pix = '1' then
+            elsif ce_pix_dly = '1' then
                 if s16_de = '1' then
                     r_out <= s16_pixel(23 downto 16);
                     g_out <= s16_pixel(15 downto 8);

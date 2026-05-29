@@ -1,5 +1,55 @@
 # Changelog
 
+## v3.2 — SCALE_PREWARP (shipping alpha, 2026-05-28)
+
+Adds curvature-keyed pre-warp scale factor so the barrel-warped output
+fills the output frame edge-to-edge (no clamped-source margins at
+corners). This is the **current shippable alpha** baseline.
+
+### Added
+
+- **SCALE_PREWARP** (`sys/vis_warp_v2_wp.vhd`): 8-entry LUT keyed by
+  `curvature_k(2:0)` containing Q1.15 scale factors. Multiplies the
+  warp magnification before src position computation. +1 DSP.
+- New stage 9b in the warp pipeline. Pipeline depth 16 → 17 stages.
+- LUT values calibrated per curvature setting (k=2 → 1.183, k=7 → saturated).
+
+### Known limitation
+
+**Top-of-frame asymmetric warp**: ~20–30% of frame's vertical extent
+at top shows asymmetric/stale-buffer content because the M9K sliding-
+window buffer has no lookahead. Bottom 70% is clean. See
+[`LIMITATIONS.md`](./LIMITATIONS.md#0-top-of-frame-asymmetric-warp-v32-release)
+and
+[`POSTMORTEM-v3.3-sync-delay-2026-05-28.md`](./POSTMORTEM-v3.3-sync-delay-2026-05-28.md).
+
+### Validated
+
+- Template hardware test: dome shape fills frame edge-to-edge
+- Galaga hardware test: barrel-warped Galaga renders correctly except
+  for top-of-frame stale region (per above)
+
+## v3.3 / v3.3b — Sync delay (FAILED, REVERTED)
+
+Two attempted implementations of N_LINES/2 sync delay to address the
+top-of-frame asymmetry. Neither shipped:
+
+- **v3.3** (counter-based FSM, ~165 lines new code): Compile-successful
+  but hardware showed 1 FPS instead of 60. Root cause: equality check
+  in the output-frame-start condition never re-fires after first frame.
+- **v3.3b** (FIFO-based, 65536×4-bit M9K-backed): Compile-successful
+  but hardware showed vanilla Galaga (ASCAL froze on last known frame).
+  Bisect testing at `SYNC_FIFO_LATENCY=1` (~zero delay) ALSO showed
+  vanilla, ruling out delay-value-only as the cause. Structural issue
+  in how the FIFO output sync interacts with the ce_pix-gated pipeline.
+
+Both attempts and the lessons learned are documented in
+[`POSTMORTEM-v3.3-sync-delay-2026-05-28.md`](./POSTMORTEM-v3.3-sync-delay-2026-05-28.md).
+
+**Future contributors**: read the postmortem BEFORE attempting v3.4.
+Sync delay is harder than it looks; needs simulation + SignalTap
+setup before any RTL changes.
+
 ## v3.1 — Bilinear pixel fetch (2026-05-28)
 
 Visual quality upgrade: the warp curves are now smooth instead of

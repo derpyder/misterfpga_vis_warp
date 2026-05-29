@@ -22,7 +22,37 @@ This is enough to **demo**, not enough to **distribute broadly**.
 
 ---
 
-## v4: Main_MiSTer userland (highest priority)
+## v3.4: Sync delay — proper implementation needed
+
+**Status**: blocked. Two attempts (v3.3 counter FSM and v3.3b FIFO)
+both failed empirically on hardware. See
+[`POSTMORTEM-v3.3-sync-delay-2026-05-28.md`](./POSTMORTEM-v3.3-sync-delay-2026-05-28.md)
+for the full debugging history.
+
+**Why this matters**: without sync delay, the top ~20-30% of each frame
+shows asymmetric/stale-buffer content. The bottom is clean. Affects
+HUDs/score areas across most arcade cores. See
+[`LIMITATIONS.md#0-top-of-frame-asymmetric-warp-v32-release`](./LIMITATIONS.md#0-top-of-frame-asymmetric-warp-v32-release).
+
+**Why deferred**: agent-assisted implementations failed; this needs
+careful design with simulation infrastructure and SignalTap probes
+wired BEFORE writing RTL. The complexity is in:
+- Multi-clock-domain ce_pix vs FIFO clk rate alignment
+- ASCAL's input-lock behavior at startup (must see valid sync from t=0)
+- Pipeline pixel-data vs sync-signal alignment through the warp stages
+
+**Pre-requisites before retry**:
+1. GHDL/Modelsim testbench that simulates vis_warp with synthetic
+   timed input and verifies output sync edges
+2. SignalTap probes on first hardware build (input sync, FIFO output,
+   pipeline stages, ASCAL inputs)
+3. Read POSTMORTEM thoroughly — specific guidance for the v3.4 retry
+   in its "Pre-emptive guidance" section
+
+**Estimated effort**: 2–3 days of dedicated work including sim setup,
+not a "spend a few hours and see" task.
+
+## v4: Main_MiSTer userland (highest priority after v3.4)
 
 **Why first**: nothing else interesting happens until end users can
 toggle vis_warp without recompiling. Hardcoded `reg_enable` and
