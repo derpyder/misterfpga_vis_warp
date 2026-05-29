@@ -19,9 +19,17 @@ quartus: 17.0.2 Lite (free edition)
 
 Symmetric barrel across the native 4:3 frame (self-tuning sync-delay), with
 the CRT shadowmask stacked downstream so the mask border curves *with* the
-tube. DE10-nano over HDMI. Full consumer core:
+tube. DE10-nano over HDMI.
+
+**▶ Try it now (no Quartus):** pre-built core + drop-in MRAs for **6
+Williams games** (Robotron, Joust, Stargate, Bubbles, Splat, Alien Arena)
+— [**download the Robotron-VIS release**](https://github.com/derpyder/Arcade-Robotron_MiSTer-VIS/releases/latest).
+Copy the `.rbf` to `_Arcade/cores/`, the `(vis_warp).mra` files to
+`_Arcade/`, bring your own MAME ROMs. Pre-named to just work, no renaming.
+
+Full consumer core + install guide:
 [`Arcade-Robotron_MiSTer-VIS`](https://github.com/derpyder/Arcade-Robotron_MiSTer-VIS).
-Adoption recipe: [`ADOPTING-A-CORE.md`](./ADOPTING-A-CORE.md).
+Adopt your own core: [`ADOPTING-A-CORE.md`](./ADOPTING-A-CORE.md).
 
 ### Dev rig — the grid test pattern that proves it
 
