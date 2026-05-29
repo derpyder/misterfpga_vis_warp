@@ -121,6 +121,71 @@ rejected for scope/system-cost reasons (cf. PR #88 Sinden Border).
 
 ---
 
+## V2 — The Tunable Tube + Tube Presets
+
+The product vision once the [`EFFECTS-BACKLOG.md`](./EFFECTS-BACKLOG.md)
+parameters land. V1 = "vis_warp does a barrel warp" (shipped, validated on
+Robotron). **V2 = "vis_warp is a configurable CRT/tube you pick from a
+menu."**
+
+### The key realization
+
+A **tube preset** is just a named bundle of `cmd 0x45` register values:
+`{curvature_h, curvature_v, sharpness, overscan, vignette, corner_radius,
+pincushion, scanline_mode}`. Every one of those is already (or will be) a
+runtime register. So **presets need NO new RTL beyond the params** — a
+preset is "write these N registers." This is exactly why we made them
+registers instead of constants.
+
+### Two layers (mirrors how MiSTer already does video presets — Robby's repo)
+
+1. **Built-in presets** — Main_MiSTer ships a small table; OSD "Warp →
+   Tube" picks one (Sony PVM / Consumer TV / Arcade / Vector / Off…),
+   which fans out to the param registers. Instant gratification, no files.
+2. **File-based presets** — `/media/fat/Presets/warp/<name>.ini` with
+   `warp_curvature_h=`, `warp_vignette=`, etc. Main_MiSTer parses and sends
+   the cmd 0x45 writes. Unlimited, user-editable, community-shareable —
+   identical model to Robby's `VIDEO_PRESETS`.
+
+Both are **pure userland (v4+)** over the param registers. The RTL stays
+dumb: it just has the registers. Selecting a preset **seeds** the sliders
+(then the user can fine-tune) rather than locking them.
+
+### Example tube presets (why the full param set matters)
+
+Each real tube type is a different *combination* — that's the point of
+having all the knobs:
+
+| Preset | curvature | sharpness | vignette | corners | scanlines | bloom | notes |
+|---|---|---|---|---|---|---|---|
+| **Flat / Off** | 0 | — | 0 | square | off | off | passthrough |
+| **Sony PVM (broadcast)** | very low | high (crisp) | low | square | light | low | pro monitors were nearly flat + sharp |
+| **Consumer Trinitron / TV** | mild | medium | slight | slightly round | medium | low | the living-room set |
+| **1980s arcade tube** | higher (H>V) | medium | noticeable | rounded | heavy | medium | the cabinet look |
+| **Vector monitor** | mild H/V | sharp | low | square | **off** | **high** | Asteroids/Star Wars glow |
+| **Cheap CRT / portable** | pincushion-ish | soft | heavy | very round | medium | low | budget-tube character |
+
+This is the UX layer that makes the parameter richness usable: most people
+pick "Arcade tube" and stop; enthusiasts open the sliders.
+
+### Open design questions for V2 presets
+
+- Built-in table vs file-based vs both? → **both** (built-ins for instant
+  use, files for community profiles).
+- Per-core preset memory? (remember "Vector" for Asteroids, "Arcade" for
+  Robotron) → yes, via the `<core>_viswarp.cfg` persistence v4 already plans.
+- Preset seeds-vs-locks the sliders? → **seeds** (pick, then tweak).
+- Preset directory: `/media/fat/Presets/warp/`.
+
+### Dependency order
+
+V2 presets require: (1) the EFFECTS-BACKLOG params implemented as registers
+(Tier 1 → Tier 2 → bloom), and (2) v4 Main_MiSTer userland (the OSD/INI →
+cmd 0x45 bridge). Presets are the capstone that ties both together into the
+thing a normal person actually wants: **pick your tube, play.**
+
+---
+
 ## Community distribution (parallel to v4)
 
 Three escalating paths. They're complementary, not exclusive — you'd
