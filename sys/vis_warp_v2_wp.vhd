@@ -59,6 +59,7 @@ entity vis_warp_v2_wp is
         warp_en     : in  std_logic;
         curvature_k : in  unsigned(2 downto 0);
         bilinear_en : in  std_logic;        -- 1=bilinear (4-bank pixel fetch), 0=NN
+        sharpness   : in  unsigned(2 downto 0);  -- sharp-bilinear K (1=soft..7=near-NN); runtime
 
         ce_pix      : in  std_logic;        -- pixel enable
 
@@ -174,13 +175,13 @@ architecture rtl of vis_warp_v2_wp is
     constant LINE_LEN_MAX       : integer := 1023;  -- cap so (N/2)*line_len < DEPTH (1023*64=65472)
     constant LINE_LEN_MIN       : integer := 64;    -- ignore implausibly short lines (hs glitch)
 
-    -- v3.3d SHARP-BILINEAR: steepen the bilinear blend fraction so pixels
+    -- v3.3d SHARP-BILINEAR: steepens the bilinear blend fraction so pixels
     -- snap to their nearest source pixel (crisp) except a thin transition
     -- band at pixel boundaries (keeps curves smooth, kills the global
-    -- resample fuzz). SHARP_K=1 → pure bilinear (soft); higher → sharper
-    -- (→ nearest-neighbor as K→∞). K=2 = classic sharp-bilinear (½-pixel
-    -- transition); K=3 sharper (⅓-pixel). Tune to taste.
-    constant SHARP_K            : integer := 2;
+    -- resample fuzz). The sharpness factor K is now a RUNTIME input (the
+    -- `sharpness` port, default 2 via the wrapper register, OSD-driven in
+    -- v4) — K=1 pure bilinear/soft, higher → toward nearest-neighbor.
+    -- See the sharpen block in the warp pipeline.
 
     type sync_fifo_t is array (0 to SYNC_FIFO_DEPTH - 1) of std_logic_vector(3 downto 0);
     signal sync_fifo        : sync_fifo_t;   -- {hs,vs,de,ce_pix} -- NO init/reset → M9K
@@ -595,6 +596,7 @@ begin
         -- Sharp-bilinear: sharpened blend fractions + integer intermediates.
         variable v_fx_s, v_fy_s   : unsigned(7 downto 0);
         variable v_fxs_i, v_fys_i : integer;
+        variable v_k              : integer;  -- runtime sharpness K (guarded ≥1)
     begin
         if rising_edge(clk) then
             if reset = '1' then
@@ -802,13 +804,18 @@ begin
                 end if;
                 -- SHARP-BILINEAR: steepen the fraction about its midpoint
                 -- (0.5 = 128) so it snaps toward 0 or 1 except a thin band.
-                --   fx_sharp = clamp(SHARP_K*(fx-128) + 128, 0, 255)
-                -- SHARP_K=1 leaves it pure bilinear; >1 sharpens toward NN.
-                v_fxs_i := SHARP_K * (to_integer(v_fx_u) - 128) + 128;
+                --   fx_sharp = clamp(v_k*(fx-128) + 128, 0, 255)
+                -- v_k is the RUNTIME sharpness (1=pure bilinear/soft; higher
+                -- → nearest-neighbor). Driven by the `sharpness` port (v4 OSD
+                -- in production; defaults to 2 via the wrapper register).
+                -- Guard to min 1 so an all-zero transient can't blur to flat.
+                v_k := to_integer(sharpness);
+                if v_k < 1 then v_k := 1; end if;
+                v_fxs_i := v_k * (to_integer(v_fx_u) - 128) + 128;
                 if    v_fxs_i < 0   then v_fx_s := (others => '0');
                 elsif v_fxs_i > 255 then v_fx_s := (others => '1');
                 else  v_fx_s := to_unsigned(v_fxs_i, 8); end if;
-                v_fys_i := SHARP_K * (to_integer(v_fy_u) - 128) + 128;
+                v_fys_i := v_k * (to_integer(v_fy_u) - 128) + 128;
                 if    v_fys_i < 0   then v_fy_s := (others => '0');
                 elsif v_fys_i > 255 then v_fy_s := (others => '1');
                 else  v_fy_s := to_unsigned(v_fys_i, 8); end if;

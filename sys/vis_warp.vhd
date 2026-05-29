@@ -106,6 +106,12 @@ architecture wrapper of vis_warp is
     -- Default '1' for Phase 5 default-on dev-time testing; HPS-driven
     -- runtime control comes with the v4 Main_MiSTer userland PR.
     signal reg_bilinear   : std_logic := '1';
+    -- LIVE (v3.3d — sharp-bilinear sharpness K), opcode 010 (was bloom).
+    -- "001"=K1 soft/pure-bilinear, "010"=K2 default, "011".."111"=sharper
+    -- toward nearest-neighbor. v4 OSD "Warp Sharpness" drives this live;
+    -- defaults to 2 until then. Mirrors reg_curvature's runtime-register
+    -- mechanism exactly.
+    signal reg_sharpness  : std_logic_vector(2 downto 0) := "010";
     -- DEAD-BUT-KEPT (preserve HPS_BUS contract; not consumed by v2):
     signal reg_bloom_en   : std_logic := '0';
     signal reg_scan_en    : std_logic := '0';
@@ -143,6 +149,8 @@ architecture wrapper of vis_warp is
     signal reg_enable_s2      : std_logic := '0';
     signal reg_curvature_s1   : std_logic_vector(2 downto 0) := "000";
     signal reg_curvature_s2   : std_logic_vector(2 downto 0) := "000";
+    signal reg_sharpness_s1   : std_logic_vector(2 downto 0) := "010";
+    signal reg_sharpness_s2   : std_logic_vector(2 downto 0) := "010";
     signal reg_bilinear_s1    : std_logic := '0';
     signal reg_bilinear_s2    : std_logic := '0';
 
@@ -155,6 +163,8 @@ architecture wrapper of vis_warp is
     attribute preserve of reg_enable_s2    : signal is true;
     attribute preserve of reg_curvature_s1 : signal is true;
     attribute preserve of reg_curvature_s2 : signal is true;
+    attribute preserve of reg_sharpness_s1 : signal is true;
+    attribute preserve of reg_sharpness_s2 : signal is true;
     attribute preserve of reg_bilinear_s1  : signal is true;
     attribute preserve of reg_bilinear_s2  : signal is true;
 
@@ -178,9 +188,8 @@ begin
                         reg_scan_en  <= v_payload(3);
                     when OP_CURVATURE =>
                         reg_curvature <= v_payload(2 downto 0);
-                    when OP_BLOOM =>
-                        reg_bloom_mode <= v_payload(12 downto 11);
-                        reg_bloom_gain <= v_payload(10 downto 7);
+                    when OP_BLOOM =>   -- v3.3d: opcode 010 repurposed bloom → sharpness
+                        reg_sharpness <= v_payload(2 downto 0);
                     when OP_SCANLINES =>
                         reg_scan_dens <= v_payload(12 downto 11);
                     when "111" =>
@@ -214,6 +223,8 @@ begin
             reg_enable_s2    <= reg_enable_s1;
             reg_curvature_s1 <= reg_curvature;
             reg_curvature_s2 <= reg_curvature_s1;
+            reg_sharpness_s1 <= reg_sharpness;
+            reg_sharpness_s2 <= reg_sharpness_s1;
             reg_bilinear_s1  <= reg_bilinear;
             reg_bilinear_s2  <= reg_bilinear_s1;
             -- reset toggle (3-flop so we can XOR _s2 ^ _s3 = 1-cycle pulse)
@@ -241,6 +252,7 @@ begin
 
             warp_en     => reg_enable_s2,
             curvature_k => unsigned(reg_curvature_s2),
+            sharpness   => unsigned(reg_sharpness_s2),
             bilinear_en => reg_bilinear_s2,
 
             ce_pix      => ce_pix_in,
