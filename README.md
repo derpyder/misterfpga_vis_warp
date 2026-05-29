@@ -23,6 +23,17 @@ tube. DE10-nano over HDMI. Full consumer core:
 [`Arcade-Robotron_MiSTer-VIS`](https://github.com/derpyder/Arcade-Robotron_MiSTer-VIS).
 Adoption recipe: [`ADOPTING-A-CORE.md`](./ADOPTING-A-CORE.md).
 
+### Dev rig — the grid test pattern that proves it
+
+![Template grid pattern, symmetric barrel dome](docs/screenshots/template-grid-symmetric.jpg)
+
+The built-in `mycore` test pattern (this fork's upgraded demo core,
+selectable patterns in the OSD). A regular grid makes the warp geometry
+unambiguous: straight lines bow into a **symmetric** dome, even top-to-
+bottom — that's how we validate the self-tuning sync-delay on the dev rig
+before any game core touches it. (The flat bars left/right are the 4:3
+source letterboxed into 16:9 — ascal's framing, outside the warp.)
+
 ---
 
 This is a fork of [`MiSTer-devel/Template_MiSTer`](https://github.com/MiSTer-devel/Template_MiSTer)
