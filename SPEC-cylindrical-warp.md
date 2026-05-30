@@ -25,13 +25,16 @@ Branch HEAD has: separable cylinder (`src_x=cx+dx·M(x²)`), `curvature_v` (kv)
 runtime V-bow dial (cmd 0x45 op001 bits 5:3; kv=0 cylinder → kv=7 ~radial),
 horizontal fill (`OVERSCAN_X_Q15`), de-saturated aspect weights (188/184).
 
-### ⚠️ The one caveat that gated everything — WEIGHTS NOW RES-ADAPTIVE (2026-05-30, sim)
+### ✅ The one caveat that gated everything — RES-ADAPTIVE + HW-VALIDATED (2026-05-30)
 **The aspect weights were HARDCODED for 480×360.** They are now computed
 per-frame by `sys/vis_warp_rescal.vhd` from the detected src_w/src_h
 (GHDL-validated against the 288×224 / 480×360 / 640×480 / 320×240 goldens). The
 fill (27458) correctly stays FIXED — edge_M is aspect-constant (~1.19), so only
-the weights needed adapting. **Remaining gate: a Quartus compile + a hardware
-check on a non-480×360 core** before main-merge / consumer shipping.
+the weights needed adapting. **Quartus clean** (RAM 284/553, zero added; setup
++0.486 ns) and **HW-proven on the Template** via an OSD source-res toggle
+(480×360↔320×240): the 320×240 cylinder stays identically curved + full-frame
+("its perfect"). **Gate cleared.** Remaining for general use: propagate the
+cylinder `sys/` into a consumer core + main-merge decision; then the prefilter.
 
 ### Deferred follow-ups (priority order)
 1. **Res-adaptive calibration** — ✅ DONE in sim (`vis_warp_rescal.vhd`,

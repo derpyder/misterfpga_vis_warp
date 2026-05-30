@@ -33,12 +33,20 @@ Commit chain on the branch: `f978d4d` (v1 X-barrel+kv) → `b2ea50d` (fill) →
 `94f3483` (de-sat) → `59dea05` (faithful 2D model) → `9f306da` (STATUS) →
 `f3627f0` (research doc) → `a6016d1` (prototype) → `df3b806` (shader finding).
 
-## ⚠️ THE GATING CAVEAT — CLEARED IN SIM (2026-05-30)
+## ✅ THE GATING CAVEAT — CLEARED ON HARDWARE (2026-05-30)
 Weights (188/184) + fill (27458) were **HARDCODED for 480×360**. The weights are
 now **res-adaptive** (`sys/vis_warp_rescal.vhd` divider, GHDL-validated against
-all 4 golden resolutions); the fill stays fixed (edge_M is aspect-constant).
-**Remaining gate: a Quartus compile + a hardware check on a NON-480×360 core**
-(e.g. Robotron 292×240) before main-merge / consumer shipping.
+all 4 golden resolutions; the fill stays fixed because edge_M is aspect-constant).
+**Quartus: clean** — RAM 284/553 (zero added vs baseline), setup slack +0.486 ns.
+**Hardware: PROVEN on the Template** via an OSD source-res toggle (`mycore`
+480×360↔320×240 with totals/sync fixed, commit `762b1f4`): at 320×240 the
+cylinder stays identically curved + edge-to-edge ("its perfect" — user), i.e.
+the divider recomputes 422/414 live. **The gate is cleared.**
+
+Remaining before main-merge / consumer shipping is no longer the calibration —
+it's (a) propagating the whole cylinder `sys/` into a real consumer core
+(Robotron-VIS `sys/` is still old radial v3.3d) and the main-merge decision, and
+(b) the minification prefilter (quality, below).
 
 ---
 
