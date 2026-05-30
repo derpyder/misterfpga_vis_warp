@@ -1,2 +1,4 @@
 # generated render artifacts (regenerate with: python warp_model.py)
 warp_out/
+# GHDL analyze/elaborate work dir
+ghdl_work/

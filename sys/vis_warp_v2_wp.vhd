@@ -60,6 +60,7 @@ entity vis_warp_v2_wp is
         curvature_k : in  unsigned(2 downto 0);
         bilinear_en : in  std_logic;        -- 1=bilinear (4-bank pixel fetch), 0=NN
         sharpness   : in  unsigned(2 downto 0);  -- sharp-bilinear K (1=soft..7=near-NN); runtime
+        curvature_v : in  unsigned(2 downto 0) := (others => '0');  -- v3.4 Block A: V-bow blend; 0=flat rows (X-barrel), 7=~radial
 
         ce_pix      : in  std_logic;        -- pixel enable
 
@@ -561,6 +562,7 @@ begin
         variable v_idx     : integer range 0 to 256;
         variable v_frac    : unsigned(7 downto 0);
         variable v_m_acc   : integer;
+        variable v_my      : integer;   -- v3.4 Block A: blended vertical magnitude
         variable v_src_x_q15 : integer;
         variable v_src_y_q15 : integer;
         variable v_src_x_pre : integer;
@@ -744,9 +746,14 @@ begin
                     s9_m_scaled <= to_unsigned(v_m_acc, 16);
                 end if;
 
-                -- Stage 10: dx·M_scaled, dy·M_scaled
+                -- Stage 10: dx·M_scaled, dy·M_y
+                -- v3.4 Block A -- X keeps the full r^2 bow (the tube SIDES); Y blends
+                -- between identity (32768 = flat rows, X-barrel) and the full bow by
+                -- curvature_v (kv). kv=0 => src_y=out_y exactly (full M9K reclaim, score
+                -- row dead flat); kv=7 => ~radial. v_my stays positive (magnitude ~1.0).
+                v_my := 32768 + ((to_integer(s9_m_scaled) - 32768) * to_integer(curvature_v)) / 8;
                 s10_dx_m <= resize(side_pipe(12).dx * signed('0' & std_logic_vector(s9_m_scaled)), s10_dx_m'length);
-                s10_dy_m <= resize(side_pipe(12).dy * signed('0' & std_logic_vector(s9_m_scaled)), s10_dy_m'length);
+                s10_dy_m <= resize(side_pipe(12).dy * to_signed(v_my, 17), s10_dy_m'length);
 
                 -- Stage 10b: src_q15 = (DST_C << 15) + dx·M
                 s10b_src_x_q15 <= to_signed((src_w_latched / 2) * 32768, s10b_src_x_q15'length) + s10_dx_m;
