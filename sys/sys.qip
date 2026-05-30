@@ -5,6 +5,7 @@ set_global_assignment -name VHDL_FILE          [file join $::quartus(qip_path) a
 set_global_assignment -name VHDL_FILE          [file join $::quartus(qip_path) pll_hdmi_adj.vhd ]
 set_global_assignment -name VHDL_FILE          [file join $::quartus(qip_path) vis_warp_pkg_v2.vhd ]
 set_global_assignment -name VHDL_FILE          [file join $::quartus(qip_path) vis_warp_luts_pkg.vhd ]
+set_global_assignment -name VHDL_FILE          [file join $::quartus(qip_path) vis_warp_rescal.vhd ]
 set_global_assignment -name VHDL_FILE          [file join $::quartus(qip_path) vis_warp_v2_wp.vhd ]
 set_global_assignment -name VHDL_FILE          [file join $::quartus(qip_path) vis_warp.vhd ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) math.sv ]

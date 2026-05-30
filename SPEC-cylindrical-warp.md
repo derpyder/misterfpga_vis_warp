@@ -25,16 +25,18 @@ Branch HEAD has: separable cylinder (`src_x=cx+dx·M(x²)`), `curvature_v` (kv)
 runtime V-bow dial (cmd 0x45 op001 bits 5:3; kv=0 cylinder → kv=7 ~radial),
 horizontal fill (`OVERSCAN_X_Q15`), de-saturated aspect weights (188/184).
 
-### ⚠️ The one caveat that gates everything
-**The aspect weights (188/184) and fill (27458) are HARDCODED for 480×360.** They
-are WRONG at any other resolution (a consumer core like Robotron would over/
-under-warp and mis-fill). **DO NOT merge to main or ship to other-res cores until
-the calibration is RES-ADAPTIVE** (weights + fill computed from detected
-src_w/src_h). That is the #1 follow-up and the gate to general use.
+### ⚠️ The one caveat that gated everything — WEIGHTS NOW RES-ADAPTIVE (2026-05-30, sim)
+**The aspect weights were HARDCODED for 480×360.** They are now computed
+per-frame by `sys/vis_warp_rescal.vhd` from the detected src_w/src_h
+(GHDL-validated against the 288×224 / 480×360 / 640×480 / 320×240 goldens). The
+fill (27458) correctly stays FIXED — edge_M is aspect-constant (~1.19), so only
+the weights needed adapting. **Remaining gate: a Quartus compile + a hardware
+check on a non-480×360 core** before main-merge / consumer shipping.
 
 ### Deferred follow-ups (priority order)
-1. **Res-adaptive calibration** (weights + fill from detected dims) — REQUIRED
-   before main-merge / consumer cores.
+1. **Res-adaptive calibration** — ✅ DONE in sim (`vis_warp_rescal.vhd`,
+   2026-05-30; GHDL goldens pass). Weights now per-resolution; fill stays fixed.
+   Pending the Quartus compile + HW check on a non-480×360 core.
 2. **Minification prefilter** (gradient-gated area-average) — optional polish so
    even worst-case 1px content is clean. 4 research agents drafted then paused;
    re-release to pick an architecture (prefilter vs output-res warp vs FPGA LDC prior art).

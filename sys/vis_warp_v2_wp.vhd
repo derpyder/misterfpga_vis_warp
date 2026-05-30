@@ -145,6 +145,22 @@ architecture rtl of vis_warp_v2_wp is
     signal src_w_latched  : integer range 0 to MAX_SRC_W := 288;
     signal src_h_latched  : integer range 0 to 4095      := 224;
 
+    -- ---- v3.4 RES-ADAPTIVE aspect weights (replace the hardcoded 188/184) ----
+    -- A frame-rare divider (sys/vis_warp_rescal.vhd) computes the Q0.24 weights
+    --   AX2 = round(508*2^24 / D),  AY2 = round(498*2^24 / D),
+    --   D   = 508*cx^2 + 498*cy^2,  cx = src_w/2, cy = src_h/2
+    -- from the detected source dims, so the cylinder calibrates at ANY resolution
+    -- (at 480x360 it reproduces the accepted 188/184). The fixed horizontal fill
+    -- OVERSCAN_X_Q15 stays correct because edge_M is aspect-constant. reg_ax2_u/
+    -- reg_ay2_u replace LUT_AX2_Q24/LUT_AY2_Q24 at stage 3; defaults = 288x224.
+    signal reg_ax2_u    : unsigned(12 downto 0) := to_unsigned(508, 13);
+    signal reg_ay2_u    : unsigned(12 downto 0) := to_unsigned(498, 13);
+    signal rescal_start : std_logic := '0';
+    signal rescal_w_u   : unsigned(11 downto 0) := to_unsigned(288, 12);
+    signal rescal_h_u   : unsigned(11 downto 0) := to_unsigned(224, 12);
+    signal src_w_prev   : integer range 0 to MAX_SRC_W := 0;
+    signal src_h_prev   : integer range 0 to 4095      := 0;
+
     -- ---- Input write cursor (advances per ce_pix && de_in) ----
     signal cnt_x_w : integer range 0 to MAX_SRC_W := 0;
     signal cnt_y_w : integer range 0 to 4095      := 0;
@@ -562,6 +578,40 @@ begin
     end process;
 
     -- ============================================================
+    -- v3.4 RES-ADAPTIVE calibration: recompute AX2/AY2 on a src-dim change.
+    -- ============================================================
+    -- Convert the detected integer dims to unsigned for the divider, and emit a
+    -- 1-cycle rescal_start whenever they change. The divider is frame-rare and
+    -- off the pixel path, so its multi-cycle latency is irrelevant; reg_ax2_u/
+    -- reg_ay2_u hold the previous result until the new one lands (during vblank).
+    rescal_w_u <= to_unsigned(src_w_latched, 12);
+    rescal_h_u <= to_unsigned(src_h_latched, 12);
+
+    process(clk)
+    begin
+        if rising_edge(clk) then
+            src_w_prev <= src_w_latched;
+            src_h_prev <= src_h_latched;
+            if (src_w_latched /= src_w_prev) or (src_h_latched /= src_h_prev) then
+                rescal_start <= '1';
+            else
+                rescal_start <= '0';
+            end if;
+        end if;
+    end process;
+
+    u_rescal : entity work.vis_warp_rescal
+        port map (
+            clk   => clk,
+            start => rescal_start,
+            src_w => rescal_w_u,
+            src_h => rescal_h_u,
+            ax2   => reg_ax2_u,
+            ay2   => reg_ay2_u,
+            done  => open
+        );
+
+    -- ============================================================
     -- WARP PIPELINE (v3.3b: ce_pix_dly-gated, DELAYED read/output domain)
     -- ============================================================
     -- Stage 1: register current cycle's (cnt_x_o, cnt_y_o, dx, dy,
@@ -716,8 +766,8 @@ begin
                 s2_dy2 <= resize(side_pipe(1).dy * side_pipe(1).dy, s2_dy2'length);
 
                 -- Stage 3: AX2·dx², AY2·dy²
-                s3_ax2dx2 <= resize(to_signed(LUT_AX2_Q24, 11) * s2_dx2, s3_ax2dx2'length);
-                s3_ay2dy2 <= resize(to_signed(LUT_AY2_Q24, 11) * s2_dy2, s3_ay2dy2'length);
+                s3_ax2dx2 <= resize(signed('0' & reg_ax2_u) * s2_dx2, s3_ax2dx2'length);
+                s3_ay2dy2 <= resize(signed('0' & reg_ay2_u) * s2_dy2, s3_ay2dy2'length);
 
                 -- Stage 4: r² = AX2·dx² + AY2·dy²; also x²-only for separable cylinder
                 s4_r2     <= resize(s3_ax2dx2, s4_r2'length)

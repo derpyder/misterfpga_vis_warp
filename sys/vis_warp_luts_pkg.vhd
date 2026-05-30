@@ -8,10 +8,15 @@ package vis_warp_luts_pkg is
 
     -- ---- Aspect-corrected r2 weights, Q0.24 ----
     -- Chosen so corner r2_norm == 2^24 for the target core/AR.
-    -- v3.4: rescaled 508/498 -> 188/184 so the corner hits 2^24 at the Template's
+    -- v3.4: rescaled 508/498 -> 188/184 so the corner hit 2^24 at the Template's
     -- 480x360 mycore (was calibrated for ~288x224, which SATURATED the magnitude
-    -- at 480x360 -> over-compression + clamp). Hand-edited for this branch; the
-    -- proper fix is res-adaptive weights computed from src_w/src_h (TODO).
+    -- at 480x360 -> over-compression + clamp).
+    -- *** SUPERSEDED (2026-05-30): the engine NO LONGER reads these constants. ***
+    -- vis_warp_rescal.vhd now computes AX2/AY2 = round({508,498}*2^24 / D) per
+    -- frame from the detected src_w/src_h (D = 508*cx^2 + 498*cy^2), so the
+    -- cylinder self-calibrates at ANY resolution (reproducing 188/184 at 480x360).
+    -- These remain only as documentation of the 480x360 baseline; the live base
+    -- weights (508/498) are the BASE_AX/BASE_AY generics in vis_warp_rescal.
     constant LUT_AX2_Q24 : integer := 188;
     constant LUT_AY2_Q24 : integer := 184;
 

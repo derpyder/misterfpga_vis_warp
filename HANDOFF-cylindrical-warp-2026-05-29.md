@@ -33,14 +33,38 @@ Commit chain on the branch: `f978d4d` (v1 X-barrel+kv) → `b2ea50d` (fill) →
 `94f3483` (de-sat) → `59dea05` (faithful 2D model) → `9f306da` (STATUS) →
 `f3627f0` (research doc) → `a6016d1` (prototype) → `df3b806` (shader finding).
 
-## ⚠️ THE GATING CAVEAT
-Weights (188/184) + fill (27458) are **HARDCODED for 480×360** → WRONG at other
-resolutions. **DO NOT merge to main or ship to consumer cores until res-adaptive
-calibration lands.** That is the immediate next task.
+## ⚠️ THE GATING CAVEAT — CLEARED IN SIM (2026-05-30)
+Weights (188/184) + fill (27458) were **HARDCODED for 480×360**. The weights are
+now **res-adaptive** (`sys/vis_warp_rescal.vhd` divider, GHDL-validated against
+all 4 golden resolutions); the fill stays fixed (edge_M is aspect-constant).
+**Remaining gate: a Quartus compile + a hardware check on a NON-480×360 core**
+(e.g. Robotron 292×240) before main-merge / consumer shipping.
 
 ---
 
-## IMMEDIATE NEXT TASK — res-adaptive calibration RTL (the gate) — NOT STARTED
+## DONE (2026-05-30) — res-adaptive calibration RTL (the gate), sim-validated
+**What landed** (branch `feature/cylindrical-warp-blockA`, GHDL analyze+elaborate
+clean, `sim/tb_rescal.vhd` → "ALL GOLDENS PASS"):
+- `sys/vis_warp_rescal.vhd` — frame-rare sequential restoring divider. Computes
+  `AX2=round(508·2²⁴/D)`, `AY2=round(498·2²⁴/D)`, `D=508·cx²+498·cy²`,
+  cx=src_w/2, cy=src_h/2. Two quotients divide in parallel (shared denom +
+  counter). Numerators built by `shift_left` (34-bit, never an int literal).
+  Rounds via `+D/2`. Defaults to 508/498 (288×224) before the first compute.
+- `sys/vis_warp_v2_wp.vhd` — added `reg_ax2_u`/`reg_ay2_u` signals, an ungated
+  change-detect process (`src_w_latched`/`src_h_latched` changed → 1-cycle
+  `rescal_start`), the `u_rescal` instance, and stage 3 now multiplies by
+  `signed('0' & reg_ax2_u)` / `signed('0' & reg_ay2_u)` instead of the
+  `LUT_AX2_Q24`/`LUT_AY2_Q24` constants. `s4_x2only`(=AX2·dx²) / `s4_r2`
+  (=AX2·dx²+AY2·dy²) unchanged downstream.
+- `sys/vis_warp_luts_pkg.vhd` — 188/184 marked SUPERSEDED (engine no longer
+  reads them; base 508/498 live as `BASE_AX/BASE_AY` generics in the divider).
+- `sys/sys.qip` — added `vis_warp_rescal.vhd` to the Quartus build.
+- Goldens verified: 288×224→508/498, 480×360→188/184, 640×480→106/104,
+  320×240→422/414. The fill constant 27458 was intentionally NOT touched.
+- **NEXT FOR THIS: USER runs the Quartus compile + HW-checks a non-480×360 core.**
+  (Sim is the gate this side; hardware is the user's.)
+
+### How it was derived (kept for the record)
 Make the weights compute per-frame from the detected source dims.
 - **Math (VALIDATED in `sim/warp_prototype.py`):**
   `AX2_eff = 508·2²⁴ / (508·cx² + 498·cy²)`, `AY2_eff = 498·2²⁴ / (same denom)`,
@@ -63,7 +87,7 @@ Make the weights compute per-frame from the detected source dims.
   resolutions, assert ax2/ay2 == golden values) BEFORE integrating into stage 3.
   Then GHDL-analyze the full engine. (User runs the Quartus compile to validate.)
 
-## THEN — minification prefilter (quality fix) — validated in sim, NOT implemented
+## IMMEDIATE NEXT TASK — minification prefilter (quality fix) — validated in sim, NOT implemented
 - **Decided approach** (RESEARCH doc, all 4 agents converge): a **Jacobian-gated,
   separable, variable-width running-box** prefilter in the X path, active only where
   local minification J>1, feeding the existing bilinear. ~few M9K, ~0 DSP. Cheap tier
