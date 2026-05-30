@@ -8,8 +8,12 @@ package vis_warp_luts_pkg is
 
     -- ---- Aspect-corrected r2 weights, Q0.24 ----
     -- Chosen so corner r2_norm == 2^24 for the target core/AR.
-    constant LUT_AX2_Q24 : integer := 508;
-    constant LUT_AY2_Q24 : integer := 498;
+    -- v3.4: rescaled 508/498 -> 188/184 so the corner hits 2^24 at the Template's
+    -- 480x360 mycore (was calibrated for ~288x224, which SATURATED the magnitude
+    -- at 480x360 -> over-compression + clamp). Hand-edited for this branch; the
+    -- proper fix is res-adaptive weights computed from src_w/src_h (TODO).
+    constant LUT_AX2_Q24 : integer := 188;
+    constant LUT_AY2_Q24 : integer := 184;
 
     -- ---- Bloom mix factor, Q0.8 (M2.75) ----
     -- out = (orig*(256 - LUT_BLOOM_MIX_Q8) + blur*LUT_BLOOM_MIX_Q8) >> 8

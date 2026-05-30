@@ -109,10 +109,10 @@ architecture rtl of vis_warp_v2_wp is
     constant LINE_ADDR_W  : integer := 7;   -- log2(N_LINES) = log2(128)
     -- v3.4 Block A: horizontal FILL compensation for the separable cylinder.
     -- The barrel magnitude overshoots the frame edge (clamp band); scale the X
-    -- magnitude by 1/edge_M so output-edge maps to source-edge (fills). At 480x360
-    -- K=2 the edge magnitude saturates to 1.30 -> 32768/1.30 = 25206. First-pass
-    -- constant for the saturated case; per-res auto-fill is a follow-up.
-    constant OVERSCAN_X_Q15 : integer := 25206;
+    -- magnitude by 1/edge_M so output-edge maps to source-edge (fills). With the
+    -- de-saturated weights (188/184) the 480x360 horizontal edge_M = 1.193 ->
+    -- 32768/1.193 = 27458. (Per-res auto-fill from the actual edge_M is a follow-up.)
+    constant OVERSCAN_X_Q15 : integer := 27458;
     constant COL_ADDR_W   : integer := 9;   -- log2(MAX_SRC_W) = log2(512)
 
     -- ---- Pixel banks (M10K-inferred, 4-way split) ----
