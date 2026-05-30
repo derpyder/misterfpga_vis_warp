@@ -39,6 +39,7 @@ module mycore
 	input         pal,
 	input         scandouble,
 	input   [2:0] pattern,         // SPEC-vis_warp-v3 task #6
+	input         lowres,          // 0=480x360, 1=320x240 (res-adaptive calib test)
 
 	output reg    ce_pix,
 
@@ -67,6 +68,17 @@ localparam VSYNC_NTSC_S  = 365;
 localparam VSYNC_NTSC_E  = 369;
 localparam VSYNC_PAL_S   = 460;
 localparam VSYNC_PAL_E   = 464;
+
+// ---- v3.4 res-adaptive TEST: selectable ACTIVE window (totals/sync fixed) ----
+// lowres=0 -> 480x360 (the calibrated default); lowres=1 -> 320x240. Only the
+// active region shrinks; HTOTAL/VTOTAL and all sync positions stay put, so ascal
+// sees IDENTICAL frame timing (no PLL/CDC change) — both 320 and 240 are well
+// inside the existing sync starts (510 / 365). vis_warp's dim-detector then sees
+// the smaller active size each frame, so vis_warp_rescal recomputes the aspect
+// weights (188/184 -> 422/414). If the divider is wrong, the 320x240 picture
+// under-warps and shows a fill/clamp band; if right, it looks identically curved.
+wire [9:0] hact = lowres ? 10'd320 : 10'd480;
+wire [9:0] vact = lowres ? 10'd240 : 10'd360;
 
 reg   [9:0] hc;
 reg   [9:0] vc;
@@ -105,7 +117,7 @@ always @(posedge clk) begin
 end
 
 always @(posedge clk) begin
-	if (hc == HACTIVE) HBlank <= 1;
+	if (hc == hact) HBlank <= 1;
 		else if (hc == 0) HBlank <= 0;
 
 	if (hc == HSYNC_START) begin
@@ -115,14 +127,14 @@ always @(posedge clk) begin
 			if(vc == (scandouble ? (2*VSYNC_PAL_S) : VSYNC_PAL_S)) VSync <= 1;
 				else if (vc == (scandouble ? (2*VSYNC_PAL_E) : VSYNC_PAL_E)) VSync <= 0;
 
-			if(vc == (scandouble ? (2*VACTIVE) : VACTIVE)) VBlank <= 1;
+			if(vc == (scandouble ? (2*vact) : vact)) VBlank <= 1;
 				else if (vc == 0) VBlank <= 0;
 		end
 		else begin
 			if(vc == (scandouble ? (2*VSYNC_NTSC_S) : VSYNC_NTSC_S)) VSync <= 1;
 				else if (vc == (scandouble ? (2*VSYNC_NTSC_E) : VSYNC_NTSC_E)) VSync <= 0;
 
-			if(vc == (scandouble ? (2*VACTIVE) : VACTIVE)) VBlank <= 1;
+			if(vc == (scandouble ? (2*vact) : vact)) VBlank <= 1;
 				else if (vc == 0) VBlank <= 0;
 		end
 	end
@@ -155,8 +167,8 @@ wire [7:0] pat_gradient = hc[8:1];
 // ---- Pattern: center crosshair ----
 // Active area: 480x360. Center: (240, 180). PAL/NTSC same active region,
 // just different VTOTAL (frame rate).
-wire [9:0] vcenter = scandouble ? 10'd360 : 10'd180;
-wire [9:0] hcenter = 10'd240;
+wire [9:0] vcenter = scandouble ? vact : (vact >> 1);
+wire [9:0] hcenter = hact >> 1;
 wire crosshair_h_pix = (vc == vcenter);
 wire crosshair_v_pix = (hc == hcenter);
 wire [7:0] pat_crosshair = (crosshair_h_pix | crosshair_v_pix) ? 8'hFF : 8'h00;

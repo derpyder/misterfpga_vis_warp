@@ -62,6 +62,7 @@ localparam CONF_STR = {
 	"O[2],TV Mode,NTSC,PAL;",
 	"O[4:3],Noise,White,Red,Green,Blue;",
 	"O[13:11],Pattern,Cosine,Grid,VBars,Gradient,Crosshair,Gray50,Black,White;",
+	"O[14],Source res,480x360,320x240;",
 	"-;",
 	"P1,Test Page 1;",
 	"P1-;",
@@ -137,6 +138,7 @@ mycore mycore
 	.pal(status[2]),
 	.scandouble(forced_scandoubler),
 	.pattern(status[13:11]),         // SPEC-vis_warp-v3 task #6: test-pattern selector
+	.lowres(status[14]),             // 0=480x360, 1=320x240 (res-adaptive calib test)
 
 	.ce_pix(ce_pix),
 
