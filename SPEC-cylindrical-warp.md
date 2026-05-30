@@ -10,6 +10,38 @@ This is a sibling mode to today's spherical engine, **not** a replacement.
 Spherical stays the ≤512px radial mode; cylindrical becomes the artifact-free,
 near-free-RAM, any-resolution mode.
 
+## ✅ STATUS 2026-05-29 — Block A "good enough" on Template
+
+Separable cylinder **validated and accepted** on the Template dev rig (user: "good
+enough"). On branch `feature/cylindrical-warp-blockA` (**NOT merged to main**).
+Journey: X-barrel (r²→X, looked like a circle) → separable (x²→X, straight
+verticals + flat rows) → fill compensation (killed the edge clamp band) →
+de-saturated weights (gentler, matched to 480×360). The **gradient** pattern
+confirmed it: smooth, no banding/clusters → pipeline is CLEAN; the 1px-grid
+"clusters/gaps at the edges" were **minification aliasing of the worst-case
+pattern**, NOT a bug. Smooth/real content renders clean.
+
+Branch HEAD has: separable cylinder (`src_x=cx+dx·M(x²)`), `curvature_v` (kv)
+runtime V-bow dial (cmd 0x45 op001 bits 5:3; kv=0 cylinder → kv=7 ~radial),
+horizontal fill (`OVERSCAN_X_Q15`), de-saturated aspect weights (188/184).
+
+### ⚠️ The one caveat that gates everything
+**The aspect weights (188/184) and fill (27458) are HARDCODED for 480×360.** They
+are WRONG at any other resolution (a consumer core like Robotron would over/
+under-warp and mis-fill). **DO NOT merge to main or ship to other-res cores until
+the calibration is RES-ADAPTIVE** (weights + fill computed from detected
+src_w/src_h). That is the #1 follow-up and the gate to general use.
+
+### Deferred follow-ups (priority order)
+1. **Res-adaptive calibration** (weights + fill from detected dims) — REQUIRED
+   before main-merge / consumer cores.
+2. **Minification prefilter** (gradient-gated area-average) — optional polish so
+   even worst-case 1px content is clean. 4 research agents drafted then paused;
+   re-release to pick an architecture (prefilter vs output-res warp vs FPGA LDC prior art).
+3. **Stage 2 reclaim** (compile-time buffer collapse, ~180 M10K) — once locked.
+4. True independent H/V magnitudes, pincushion (signed), H/V overscan, then
+   Block B (vignette, corner rounding).
+
 ---
 
 ## UPDATE 2026-05-29 — Stage 0 look-locked in sim; design refined
