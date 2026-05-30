@@ -28,21 +28,40 @@ def edge_M(AX2):
     return float(meff(s4, K)[0])
 
 
-def render(AX2, label):
-    fill = edge_M(AX2)                       # fill = horizontal edge magnitude
+# source as a continuous intensity field (1.0 on a grid line, 0.0 else) so we can
+# sample it the way the engine does and SEE minification behavior.
+def src_col_line(x):
+    return 1.0 if (int(round(x)) % GRID) < 2 else 0.0
+
+
+_LINECOL = np.array([(int(c) % GRID) < 2 for c in range(W)], dtype=np.float64)  # vert lines vs x
+
+
+def render(AX2, label, sampler):
+    fill = edge_M(AX2)
     oy, ox = np.mgrid[0:H, 0:W]
     dx = ox - cx
     mx = meff(AX2 * dx * dx, K) / fill
     sx = cx + dx * mx
-    ix = np.round(sx).astype(int)
-    ok = (ix >= 0) & (ix < W)
-    ixc = np.clip(ix, 0, W - 1)
-    grid = ((ixc % GRID < 2) | (oy % GRID < 2))
+    hline = (oy % GRID) < 2                                   # horizontal lines: src_y=out_y (flat)
+    if sampler == "nearest":
+        ix = np.clip(np.round(sx).astype(int), 0, W - 1)
+        vline = _LINECOL[ix]
+    else:  # 2-tap bilinear == the engine's X sampler (aliases under compression)
+        x0 = np.clip(np.floor(sx).astype(int), 0, W - 1)
+        x1 = np.clip(x0 + 1, 0, W - 1)
+        fxf = sx - np.floor(sx)
+        vline = _LINECOL[x0] * (1 - fxf) + _LINECOL[x1] * fxf
+    val = np.clip(np.maximum(vline, hline.astype(float)), 0, 1)
+    ok = (sx >= 0) & (sx <= W - 1)
     img = np.zeros((H, W, 3), np.uint8)
     img[:] = (8, 8, 16)
-    img[ok & grid] = (240, 240, 240)
-    img[~ok] = (0, 0, 0)
-    return f"{label}  AX2={AX2} edge_M={fill:.3f}", img
+    g = (val * 240).astype(np.uint8)
+    img[..., 0] = np.maximum(img[..., 0], g)
+    img[..., 1] = np.maximum(img[..., 1], g)
+    img[..., 2] = np.maximum(img[..., 2], g)
+    img[~ok] = 0
+    return f"{label} ({sampler})  edge_M={fill:.3f}", img
 
 
 # de-saturated weights: rescale so corner (cx,cy) == 2^24 at THIS res
@@ -50,8 +69,9 @@ scale = SCALE / (508 * cx * cx + 498 * cy * cy)
 AX2_desat = round(508 * scale)
 
 tiles = [
-    render(508, "CURRENT (sat) -- reproduces hardware"),
-    render(AX2_desat, "DE-SATURATED (fix candidate)"),
+    render(508,        "CURRENT sat",  "bilinear"),   # what the last build showed
+    render(AX2_desat,  "DE-SAT",       "bilinear"),   # what's compiling now (hw sampler)
+    render(AX2_desat,  "DE-SAT ideal", "nearest"),    # de-sat geometry, no minif aliasing
 ]
 
 bar = 18
