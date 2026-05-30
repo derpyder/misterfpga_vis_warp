@@ -47,6 +47,22 @@ no CDC — mirror ascal's own o_line0..3 readback cache, widened to N lines.)*
 - **Reject:** summed-area table (precision/overflow blows the on-chip budget; axis-
   aligned only — no quality edge over the running-box).
 
+**Shader-evidence refinement (CRT-Royale / crt-geom / crt-lottes / MAME):** the
+good CRT shaders warp at OUTPUT res on an already-upscaled image — but **even there
+the curved edge still minifies, and they ALL carry an explicit prefilter** (not free
+mipmap). crt-lottes (no prefilter) is the reference example of OUR exact aliasing.
+Since output-res is infeasible here (Decision 1), source-res is forced ⇒ **the
+prefilter is MANDATORY for quality, not optional polish.** Two confirmed tiers:
+- **Cheap (crt-geom):** 3× oversample of the scanline/beam weight, offset by the
+  local footprint — kills the scanline×curvature moiré specifically. Minimal cost.
+- **Rigorous (CRT-Royale):** an analytic 2×2-Jacobian footprint → 4–24-tap weighted
+  area sample, gated to the compressing band (`aa_level` early-out).
+**FPGA-friendly key:** GPUs size the footprint with free `ddx/ddy`; WE size it
+**analytically from the closed-form warp derivative** (the Jacobian we already
+compute) — no derivatives needed. Our Jacobian-gated running-box is exactly the
+FPGA realization of Royale's approach; crt-geom's 3× beam-oversample is the
+minimal-cost first cut.
+
 ---
 
 ## REUSABLE ASSETS (don't reinvent)
