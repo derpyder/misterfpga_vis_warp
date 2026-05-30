@@ -107,6 +107,12 @@ architecture rtl of vis_warp_v2_wp is
     constant HALF_W       : integer := MAX_SRC_W / 2;   -- 256
     constant BANK_DEPTH   : integer := N_HLINES * HALF_W;
     constant LINE_ADDR_W  : integer := 7;   -- log2(N_LINES) = log2(128)
+    -- v3.4 Block A: horizontal FILL compensation for the separable cylinder.
+    -- The barrel magnitude overshoots the frame edge (clamp band); scale the X
+    -- magnitude by 1/edge_M so output-edge maps to source-edge (fills). At 480x360
+    -- K=2 the edge magnitude saturates to 1.30 -> 32768/1.30 = 25206. First-pass
+    -- constant for the saturated case; per-res auto-fill is a follow-up.
+    constant OVERSCAN_X_Q15 : integer := 25206;
     constant COL_ADDR_W   : integer := 9;   -- log2(MAX_SRC_W) = log2(512)
 
     -- ---- Pixel banks (M10K-inferred, 4-way split) ----
@@ -810,15 +816,17 @@ begin
                 else
                     s9_m_scaled <= to_unsigned(v_m_acc, 16);
                 end if;
-                -- Stage 9x: clamp (X separable)
+                -- Stage 9x: clamp, then horizontal FILL compensation (X separable).
+                -- Scale X magnitude by OVERSCAN_X_Q15/32768 = 1/edge_M so the output
+                -- edge maps to the source edge (fills the frame, kills the clamp band).
                 v_m_acc := to_integer(s8x_m_scaled_pre) / 2 + 32768;
                 if v_m_acc < 0 then
-                    s9x_m_scaled <= to_unsigned(0, 16);
+                    v_m_acc := 0;
                 elsif v_m_acc > 65535 then
-                    s9x_m_scaled <= to_unsigned(65535, 16);
-                else
-                    s9x_m_scaled <= to_unsigned(v_m_acc, 16);
+                    v_m_acc := 65535;
                 end if;
+                v_m_acc := (v_m_acc * OVERSCAN_X_Q15) / 32768;
+                s9x_m_scaled <= to_unsigned(v_m_acc, 16);
 
                 -- Stage 10: dx·Mx, dy·My (separable cylinder)
                 -- X uses s9x_m_scaled (from x²-only LUT) -> horizontal bow only,
