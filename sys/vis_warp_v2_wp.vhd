@@ -250,6 +250,7 @@ architecture rtl of vis_warp_v2_wp is
     signal s2_dx2, s2_dy2          : signed(26 downto 0) := (others => '0');
     signal s3_ax2dx2, s3_ay2dy2    : signed(30 downto 0) := (others => '0');
     signal s4_r2                   : signed(31 downto 0) := (others => '0');
+    signal s4_x2only               : signed(31 downto 0) := (others => '0');  -- v3.4 fix: x²-only for separable cylinder
     signal s5_m_lo, s5_m_hi        : unsigned(15 downto 0) := (others => '0');
     signal s5_frac                 : unsigned(7 downto 0) := (others => '0');
     signal s5b_m_lo, s5b_m_hi      : unsigned(15 downto 0) := (others => '0');
@@ -263,6 +264,20 @@ architecture rtl of vis_warp_v2_wp is
     signal s7b_m_centered          : signed(17 downto 0) := (others => '0');
     signal s8_m_scaled_pre         : signed(20 downto 0) := (others => '0');
     signal s9_m_scaled             : unsigned(15 downto 0) := (others => '0');
+    -- v3.4 Block A: parallel X-magnitude pipeline (x²-only → separable cylinder)
+    signal s5x_m_lo, s5x_m_hi     : unsigned(15 downto 0) := (others => '0');
+    signal s5x_frac                : unsigned(7 downto 0)  := (others => '0');
+    signal s5bx_m_lo, s5bx_m_hi   : unsigned(15 downto 0) := (others => '0');
+    signal s5bx_frac               : unsigned(7 downto 0)  := (others => '0');
+    signal s5cx_m_diff             : signed(16 downto 0)   := (others => '0');
+    signal s5cx_m_lo               : unsigned(15 downto 0) := (others => '0');
+    signal s5cx_frac               : unsigned(7 downto 0)  := (others => '0');
+    signal s6x_m_diff_frac         : signed(24 downto 0)   := (others => '0');
+    signal s6x_m_lo                : unsigned(15 downto 0) := (others => '0');
+    signal s7x_m_raw               : unsigned(15 downto 0) := (others => '0');
+    signal s7bx_m_centered         : signed(17 downto 0)   := (others => '0');
+    signal s8x_m_scaled_pre        : signed(20 downto 0)   := (others => '0');
+    signal s9x_m_scaled            : unsigned(15 downto 0) := (others => '0');
     signal s10_dx_m, s10_dy_m      : signed(31 downto 0) := (others => '0');
     signal s10b_src_x_q15          : signed(31 downto 0) := (others => '0');
     signal s10b_src_y_q15          : signed(31 downto 0) := (others => '0');
@@ -605,7 +620,18 @@ begin
                 side_pipe <= (others => WARP_SIDE_ZERO);
                 s2_dx2 <= (others => '0'); s2_dy2 <= (others => '0');
                 s3_ax2dx2 <= (others => '0'); s3_ay2dy2 <= (others => '0');
-                s4_r2 <= (others => '0');
+                s4_r2 <= (others => '0'); s4_x2only <= (others => '0');
+                s5x_m_lo <= (others => '0'); s5x_m_hi <= (others => '0');
+                s5x_frac <= (others => '0');
+                s5bx_m_lo <= (others => '0'); s5bx_m_hi <= (others => '0');
+                s5bx_frac <= (others => '0');
+                s5cx_m_diff <= (others => '0'); s5cx_m_lo <= (others => '0');
+                s5cx_frac <= (others => '0');
+                s6x_m_diff_frac <= (others => '0'); s6x_m_lo <= (others => '0');
+                s7x_m_raw <= (others => '0');
+                s7bx_m_centered <= (others => '0');
+                s8x_m_scaled_pre <= (others => '0');
+                s9x_m_scaled <= (others => '0');
                 s5_m_lo <= (others => '0'); s5_m_hi <= (others => '0');
                 s5_frac <= (others => '0');
                 s5b_m_lo <= (others => '0'); s5b_m_hi <= (others => '0');
@@ -687,11 +713,12 @@ begin
                 s3_ax2dx2 <= resize(to_signed(LUT_AX2_Q24, 11) * s2_dx2, s3_ax2dx2'length);
                 s3_ay2dy2 <= resize(to_signed(LUT_AY2_Q24, 11) * s2_dy2, s3_ay2dy2'length);
 
-                -- Stage 4: r² = AX2·dx² + AY2·dy²
-                s4_r2 <= resize(s3_ax2dx2, s4_r2'length)
-                       + resize(s3_ay2dy2, s4_r2'length);
+                -- Stage 4: r² = AX2·dx² + AY2·dy²; also x²-only for separable cylinder
+                s4_r2     <= resize(s3_ax2dx2, s4_r2'length)
+                           + resize(s3_ay2dy2, s4_r2'length);
+                s4_x2only <= resize(s3_ax2dx2, s4_x2only'length);  -- v3.4: x²-only (cyl X input)
 
-                -- Stage 5: LUT lookup (idx + frac from r²)
+                -- Stage 5: LUT lookup (idx + frac from r²) -- Y / combined magnitude
                 if s4_r2 < 0 then
                     v_idx  := 0;
                     v_frac := (others => '0');
@@ -705,38 +732,76 @@ begin
                 s5_m_lo <= WARP_LUT(v_idx);
                 s5_m_hi <= WARP_LUT(v_idx + 1);
                 s5_frac <= v_frac;
+                -- Stage 5x: LUT lookup from x²-only (separable cylinder X magnitude)
+                if s4_x2only < 0 then
+                    v_idx  := 0;
+                    v_frac := (others => '0');
+                elsif s4_x2only >= to_signed(2**24, s4_x2only'length) then
+                    v_idx  := 255;
+                    v_frac := (others => '1');
+                else
+                    v_idx  := to_integer(unsigned(s4_x2only(23 downto 16)));
+                    v_frac := unsigned(s4_x2only(15 downto 8));
+                end if;
+                s5x_m_lo <= WARP_LUT(v_idx);
+                s5x_m_hi <= WARP_LUT(v_idx + 1);
+                s5x_frac <= v_frac;
 
-                -- Stage 5b: FF buffer
+                -- Stage 5b: FF buffer (Y/combined)
                 s5b_m_lo <= s5_m_lo;
                 s5b_m_hi <= s5_m_hi;
                 s5b_frac <= s5_frac;
+                -- Stage 5bx: FF buffer (X separable)
+                s5bx_m_lo <= s5x_m_lo;
+                s5bx_m_hi <= s5x_m_hi;
+                s5bx_frac <= s5x_frac;
 
-                -- Stage 5c: m_diff sub
+                -- Stage 5c: m_diff sub (Y/combined)
                 s5c_m_diff <= signed('0' & std_logic_vector(s5b_m_hi))
                             - signed('0' & std_logic_vector(s5b_m_lo));
                 s5c_m_lo   <= s5b_m_lo;
                 s5c_frac   <= s5b_frac;
+                -- Stage 5cx: m_diff sub (X separable)
+                s5cx_m_diff <= signed('0' & std_logic_vector(s5bx_m_hi))
+                             - signed('0' & std_logic_vector(s5bx_m_lo));
+                s5cx_m_lo   <= s5bx_m_lo;
+                s5cx_frac   <= s5bx_frac;
 
-                -- Stage 6: m_diff * frac
+                -- Stage 6: m_diff * frac (Y/combined)
                 s6_m_diff_frac <= resize(
                     s5c_m_diff * signed('0' & std_logic_vector(s5c_frac)),
                     s6_m_diff_frac'length);
                 s6_m_lo <= s5c_m_lo;
+                -- Stage 6x: m_diff * frac (X separable)
+                s6x_m_diff_frac <= resize(
+                    s5cx_m_diff * signed('0' & std_logic_vector(s5cx_frac)),
+                    s6x_m_diff_frac'length);
+                s6x_m_lo <= s5cx_m_lo;
 
-                -- Stage 7: m_raw = m_lo + (prod >> 8)
+                -- Stage 7: m_raw = m_lo + (prod >> 8) (Y/combined)
                 s7_m_raw <= s6_m_lo + unsigned(s6_m_diff_frac(23 downto 8));
+                -- Stage 7x (X separable)
+                s7x_m_raw <= s6x_m_lo + unsigned(s6x_m_diff_frac(23 downto 8));
 
-                -- Stage 7b: m_centered = m_raw - 32768
+                -- Stage 7b: m_centered = m_raw - 32768 (Y/combined)
                 s7b_m_centered <= resize(
                     signed('0' & std_logic_vector(s7_m_raw)) - to_signed(32768, 17),
                     s7b_m_centered'length);
+                -- Stage 7bx (X separable)
+                s7bx_m_centered <= resize(
+                    signed('0' & std_logic_vector(s7x_m_raw)) - to_signed(32768, 17),
+                    s7bx_m_centered'length);
 
-                -- Stage 8: m_scaled_pre = m_centered * K
+                -- Stage 8: m_scaled_pre = m_centered * K (Y/combined)
                 s8_m_scaled_pre <= resize(
                     s7b_m_centered * signed('0' & std_logic_vector(side_pipe(10).k)),
                     s8_m_scaled_pre'length);
+                -- Stage 8x (X separable)
+                s8x_m_scaled_pre <= resize(
+                    s7bx_m_centered * signed('0' & std_logic_vector(side_pipe(10).k)),
+                    s8x_m_scaled_pre'length);
 
-                -- Stage 9: clamp(32768 + m_scaled_pre/2)
+                -- Stage 9: clamp(32768 + m_scaled_pre/2) (Y/combined)
                 v_m_acc := to_integer(s8_m_scaled_pre) / 2 + 32768;
                 if v_m_acc < 0 then
                     s9_m_scaled <= to_unsigned(0, 16);
@@ -745,14 +810,24 @@ begin
                 else
                     s9_m_scaled <= to_unsigned(v_m_acc, 16);
                 end if;
+                -- Stage 9x: clamp (X separable)
+                v_m_acc := to_integer(s8x_m_scaled_pre) / 2 + 32768;
+                if v_m_acc < 0 then
+                    s9x_m_scaled <= to_unsigned(0, 16);
+                elsif v_m_acc > 65535 then
+                    s9x_m_scaled <= to_unsigned(65535, 16);
+                else
+                    s9x_m_scaled <= to_unsigned(v_m_acc, 16);
+                end if;
 
-                -- Stage 10: dx·M_scaled, dy·M_y
-                -- v3.4 Block A -- X keeps the full r^2 bow (the tube SIDES); Y blends
-                -- between identity (32768 = flat rows, X-barrel) and the full bow by
-                -- curvature_v (kv). kv=0 => src_y=out_y exactly (full M9K reclaim, score
-                -- row dead flat); kv=7 => ~radial. v_my stays positive (magnitude ~1.0).
+                -- Stage 10: dx·Mx, dy·My (separable cylinder)
+                -- X uses s9x_m_scaled (from x²-only LUT) -> horizontal bow only,
+                --   vertical lines stay STRAIGHT (not bowed by y-position).
+                -- Y blends between identity (32768=flat rows) and the Y bow by kv/8.
+                --   kv=0 => src_y=out_y exactly (score row flat, full reclaim ready)
+                --   kv=7 => full Y bow (~radial)
                 v_my := 32768 + ((to_integer(s9_m_scaled) - 32768) * to_integer(curvature_v)) / 8;
-                s10_dx_m <= resize(side_pipe(12).dx * signed('0' & std_logic_vector(s9_m_scaled)), s10_dx_m'length);
+                s10_dx_m <= resize(side_pipe(12).dx * signed('0' & std_logic_vector(s9x_m_scaled)), s10_dx_m'length);
                 s10_dy_m <= resize(side_pipe(12).dy * to_signed(v_my, 17), s10_dy_m'length);
 
                 -- Stage 10b: src_q15 = (DST_C << 15) + dx·M
