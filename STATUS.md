@@ -121,23 +121,23 @@ FIFO. Revised order: **Stage-0 sim → Stage-2 reclaim → hi-res width.**
   drive the real engine with a synthetic grid raster and confirm `src_y==out_y` at
   kv=0 (horizontal lines on exact rows), straight verticals, symmetric warp. The
   reclaim's validation rig is ready — re-run it as the reclaim lands.
-- **Stage 2 (reclaim) — buffer collapse PROVEN; one sync-alignment bug left.** The
-  reclaim is mostly a generic: the banks are sized `BANK_DEPTH=(N_LINES/2)·(MAX_SRC_W/2)`,
-  so a cyl build = instantiate `vis_warp_v2_wp` with `N_LINES=2` (+ a `CYL_MODE`
-  generic). Landed on `feature` (spherical stays byte-identical):
-  `LAG_SHIFT=log2(N_LINES/2)` scales the self-tuning lag (was a hardcoded ×64);
-  `det_y_in_frame` range fixed (latent bug — was tied to `N_LINES`, overflowed at 2);
-  `CYL_MODE` generic + read-window pinned to `cnt_y_o`. **GHDL: spherical (N=128)
-  byte-identical GATE PASS; cyl (N=2) collapses the buffer and `src_y==out_y`
-  PASSES** → the M9K reclaim works (~165→~3 M9K pixel buffer).
-  **Remaining bug:** a right-edge smear on the row *before* each (even) horizontal
-  line — those pixels read the mid-write *next even line* from the even bank.
-  Root cause = a **1-line `cnt_y_o`-vs-emitted-sync skew** at line boundaries,
-  exposed by the now-tight 1-line lag (masked in spherical by the 64-line lag).
-  This is SPEC-cyl §3.6 (align the emitted output sync to the read cursor — the
-  v3.3-postmortem zone), **not** the buffer. Next: instrument `cnt_y_o` vs the
-  emitted `de_out` at line boundaries; align them (or rip the FIFO to a clean
-  1-line shift). Cyl WIP stays on `feature`, not `main`.
+- **Stage 2 (reclaim) — DONE in sim (GATE PASS, both modes).** The reclaim is
+  mostly a generic: banks are sized `BANK_DEPTH=(N_LINES/2)·(MAX_SRC_W/2)`, so a cyl
+  build instantiates `vis_warp_v2_wp` with `N_LINES=2` + a `CYL_MODE` generic.
+  Engine changes (spherical byte-identical): `LAG_SHIFT=log2(N_LINES/2)` scales the
+  self-tuning lag (was a hardcoded ×64); `det_y_in_frame` range fixed (latent bug,
+  was tied to `N_LINES`); `CYL_MODE` generic; and the stage-12 read window pinned to
+  the **pixel's own** `side_pipe(15).cnt_y_o`, not the live `cnt_y_o` signal.
+  **GHDL `tb_warp_stage0`: spherical (N=128) byte-identical GATE PASS; cyl (N=2)
+  GATE PASS** — buffer collapses (~165 → ~3 M9K), `src_y==out_y`, straight
+  verticals, symmetric warp, no smear.
+  **The smear (now fixed) was alignment, not the buffer:** the clamp used the live
+  `cnt_y_o` signal, which ticks to the next line during inter-line blanking while
+  that line's last pixels are still in the 16-stage pipeline — pinning their `src_y`
+  to the mid-write next (even, bright) line. Using the pixel's own
+  `side_pipe(15).cnt_y_o` aligns them. Spherical's ±64 window had hidden it.
+  **Next:** USER Quartus build to confirm RAM ~105/553 + timing; then (optional)
+  shrink the 65536-deep sync FIFO (~20 M9K) for the 1-line lag; then hi-res width.
 
 ## Parked (still useful, not the path forward)
 

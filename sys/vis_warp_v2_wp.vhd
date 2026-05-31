@@ -1016,8 +1016,14 @@ begin
                 -- right edge (bright next-line bleeds in). Pin the window to the reader's
                 -- completed line. (Spherical build: CYL_MODE=false, byte-identical.)
                 if CYL_MODE then
-                    v_line_min := cnt_y_o;
-                    v_line_max := cnt_y_o;
+                    -- Use THIS PIXEL's own output line (side_pipe(15), aligned with
+                    -- s11_src_y) -- NOT the live cnt_y_o signal, which has already ticked
+                    -- to the next line during the inter-line blanking while this line's
+                    -- last (right-edge) pixels are still in flight. That skew (harmless
+                    -- under spherical's +/-64 window) otherwise pins src_y to the
+                    -- mid-write next line and smears the right edge.
+                    v_line_min := side_pipe(15).cnt_y_o;
+                    v_line_max := side_pipe(15).cnt_y_o;
                 end if;
                 v_src_y_fin := s11_src_y;
                 if v_src_y_fin > v_line_max then
