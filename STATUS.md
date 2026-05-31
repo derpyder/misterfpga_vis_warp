@@ -128,9 +128,20 @@ buffer to a 2-line ping-pong, freeing ~180 M9K. Build order
    the cheaper, lower-risk path. GHDL gate clean at 296. **HW confirm still pending.**
 2. **Stage-2 reclaim** (128→2 line, kv=0) → recover the M9K. ✅ **DONE in sim**
    (done *before* the 2× width, per the reclaim-first decision below).
-3. Re-introduce kv>0 within the buffer budget, **or** document hi-res as
-   cylinder-only (kv=0). **Decision: cylinder-only.** Hi-res rides the cyl passthrough
-   (kv=0 ⇒ src_y=out_y ⇒ 2-line buffer); kv>0 keeps source-res. Documented, not a TODO.
+3. Re-introduce kv>0 (the vertical bow). **Two ways, both sim-proven (2026-05-31):**
+   - **Cyl (kv=0):** fully crisp both axes, but flat rows (no curve) + the M9K reclaim.
+     This is what's hardware-validated + shipped on Robotron `main`.
+   - **Spherical hi-res (`N_LINES=128`, `OUT_SCALE=2`, kv>0):** the rows BOW (curve)
+     **and** stay crisp at gentle kv. The 2×-WIDTH read-double is a HORIZONTAL fix only
+     (vertical lines crisp at any kv); the bow's vertical magnification doubles
+     HORIZONTAL lines, which 2× width can't fix — but the residual scales with kv and is
+     negligible in the usable range. Dual-axis sweep (`sim/sph_check.py`, 296×240 grid16,
+     N=128 OS=2): **kv 0–1 = perfectly crisp; kv 2–4 = ONE 2–3px horizontal line on the
+     whole frame; kv 7 = 4px.** So a gentle bow (kv≈2, Robotron's old default) is
+     bow+crisp. Cost vs cyl: no M9K reclaim (full 128-line buffer, ~same M9K as the old
+     spherical Robotron) + it re-engages the 64-line sync FIFO (the v3.3-postmortem
+     fragile zone) — sim-clean, but a hardware build is the gate. Full crisp at HIGH kv
+     would need 2× HEIGHT too (a real lift; not done).
 
 **Open questions to resolve in sim before RTL:** kv≠0 breaks the 2-line reclaim
 (vertical bow needs lookahead again); 2× throughput at clk_video; the sim must
