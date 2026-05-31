@@ -982,8 +982,13 @@ begin
                 --   s9x_m_scaled and the registered s9_rad_fx) is exact.
                 -- Y blends identity (32768=flat rows) toward the radial by kv/8.
                 --   kv=0 => src_y=out_y (flat rows); kv=7 => full Y bow (~radial).
+                -- kh blend divisor /4 (not /8): the X bow blends from the already-warped
+                -- x²-only baseline, so it needs ~2x the gain of the Y bow to read as strong;
+                -- /4 maps kh 0..7 to 0..1.75x the (radial-x²only) difference. Past ~1.0x the
+                -- outermost corner columns can clamp (src_x>2W, handled by the stage-11/12
+                -- clamp) -- a gentle corner pull-in, acceptable for a CRT barrel.
                 v_mx := to_integer(s9x_m_scaled)
-                      + ((to_integer(s9_rad_fx) - to_integer(s9x_m_scaled)) * to_integer(curvature_h)) / 8;
+                      + ((to_integer(s9_rad_fx) - to_integer(s9x_m_scaled)) * to_integer(curvature_h)) / 4;
                 v_my := 32768 + ((to_integer(s9_m_scaled) - 32768) * to_integer(curvature_v)) / 8;
                 s10_dx_m <= resize(side_pipe(12).dx * to_signed(v_mx, 18), s10_dx_m'length);
                 s10_dy_m <= resize(side_pipe(12).dy * to_signed(v_my, 17), s10_dy_m'length);
