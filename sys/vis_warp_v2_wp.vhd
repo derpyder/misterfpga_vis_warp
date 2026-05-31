@@ -327,6 +327,7 @@ architecture rtl of vis_warp_v2_wp is
     signal s7b_m_centered          : signed(17 downto 0) := (others => '0');
     signal s8_m_scaled_pre         : signed(20 downto 0) := (others => '0');
     signal s9_m_scaled             : unsigned(15 downto 0) := (others => '0');
+    signal s9_rad_fx               : unsigned(15 downto 0) := (others => '0');  -- radial mag, X-overscan-filled, registered (kh blend; keeps stage 10 single-multiply for timing)
     -- v3.4 Block A: parallel X-magnitude pipeline (x²-only → separable cylinder)
     signal s5x_m_lo, s5x_m_hi     : unsigned(15 downto 0) := (others => '0');
     signal s5x_frac                : unsigned(7 downto 0)  := (others => '0');
@@ -717,7 +718,6 @@ begin
         variable v_m_acc   : integer;
         variable v_my      : integer;   -- v3.4 Block A: blended vertical magnitude
         variable v_mx      : integer;   -- kh: blended horizontal magnitude (x²-only → radial)
-        variable v_rad_fx  : integer;   -- radial magnitude with the X overscan fill applied
         variable v_src_x_q15 : integer;
         variable v_src_y_q15 : integer;
         variable v_src_x_pre : integer;
@@ -783,6 +783,7 @@ begin
                 s7b_m_centered <= (others => '0');
                 s8_m_scaled_pre <= (others => '0');
                 s9_m_scaled <= (others => '0');
+                s9_rad_fx <= (others => '0');
                 s10_dx_m <= (others => '0'); s10_dy_m <= (others => '0');
                 s10b_src_x_q15 <= (others => '0'); s10b_src_y_q15 <= (others => '0');
                 s11_src_x <= 0; s11_src_y <= 0;
@@ -952,13 +953,14 @@ begin
 
                 -- Stage 9: clamp(32768 + m_scaled_pre/2) (Y/combined)
                 v_m_acc := to_integer(s8_m_scaled_pre) / 2 + 32768;
-                if v_m_acc < 0 then
-                    s9_m_scaled <= to_unsigned(0, 16);
-                elsif v_m_acc > 65535 then
-                    s9_m_scaled <= to_unsigned(65535, 16);
-                else
-                    s9_m_scaled <= to_unsigned(v_m_acc, 16);
-                end if;
+                if v_m_acc < 0 then v_m_acc := 0;
+                elsif v_m_acc > 65535 then v_m_acc := 65535; end if;
+                s9_m_scaled <= to_unsigned(v_m_acc, 16);
+                -- Register the radial magnitude WITH the X overscan fill, for the kh H-bow
+                -- blend at stage 10. Computed HERE (parallel to the stage-9x fill multiply,
+                -- not in series) so stage 10 stays a single big multiply (dx·v_mx) and meets
+                -- 20 MHz -- the combinational version at stage 10 broke timing.
+                s9_rad_fx <= to_unsigned((v_m_acc * OVERSCAN_X_Q15) / 32768, 16);
                 -- Stage 9x: clamp, then horizontal FILL compensation (X separable).
                 -- Scale X magnitude by OVERSCAN_X_Q15/32768 = 1/edge_M so the output
                 -- edge maps to the source edge (fills the frame, kills the clamp band).
@@ -976,13 +978,12 @@ begin
                 --   RADIAL magnitude (s9_m_scaled, with the X overscan fill applied) by kh/8.
                 --   kh=0 => x²-only (straight verticals; byte-identical to before). kh>0 =>
                 --   the radial X depends on y, so the COLUMNS curve (horizontal bow). The
-                --   fill is a linear scale, so blending the two POST-fill magnitudes equals
-                --   blending pre-fill then filling -- no extra pipeline register needed.
+                --   fill is a linear scale, so blending the two POST-fill magnitudes (here
+                --   s9x_m_scaled and the registered s9_rad_fx) is exact.
                 -- Y blends identity (32768=flat rows) toward the radial by kv/8.
                 --   kv=0 => src_y=out_y (flat rows); kv=7 => full Y bow (~radial).
-                v_rad_fx := (to_integer(s9_m_scaled) * OVERSCAN_X_Q15) / 32768;
                 v_mx := to_integer(s9x_m_scaled)
-                      + ((v_rad_fx - to_integer(s9x_m_scaled)) * to_integer(curvature_h)) / 8;
+                      + ((to_integer(s9_rad_fx) - to_integer(s9x_m_scaled)) * to_integer(curvature_h)) / 8;
                 v_my := 32768 + ((to_integer(s9_m_scaled) - 32768) * to_integer(curvature_v)) / 8;
                 s10_dx_m <= resize(side_pipe(12).dx * to_signed(v_mx, 18), s10_dx_m'length);
                 s10_dy_m <= resize(side_pipe(12).dy * to_signed(v_my, 17), s10_dy_m'length);
