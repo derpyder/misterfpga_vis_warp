@@ -52,6 +52,16 @@ use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
 entity vis_warp is
+    generic (
+        -- Engine selection (overridden by the sys_top MISTER_WARP_CYL plumbing for the
+        -- cylindrical-reclaim + hi-res build). Defaults = the shipped spherical engine,
+        -- byte-identical to before this generic existed. INTEGER-only so a Verilog
+        -- (sys_top) instantiation can override them cleanly; CYL_MODE is derived from
+        -- WARP_N_LINES (=2 ⇒ cylindrical reclaim, the only use of a 2-line buffer).
+        WARP_N_LINES   : integer := 128;  -- 128 = spherical sliding window; 2 = cyl reclaim
+        WARP_OUT_SCALE : integer := 1     -- 1 = source-res output; 2 = hi-res 2x (line-doubling
+                                          --   fix). 2 requires WARP_N_LINES=2 + >=2x clk headroom.
+    );
     port (
         clk_sys     : in  std_logic;
         clk_in      : in  std_logic;     -- = clk_video at site C
@@ -139,6 +149,10 @@ architecture wrapper of vis_warp is
     -- v2 reset is driven by the OP=111 reset_internal pulse, converted
     -- to a toggle on clk_sys and edge-detected on clk_in (see below).
     signal v2_reset_sync : std_logic;
+
+    -- Engine emit-enable (OUT_SCALE x ce_pix_dly). Drives the external ce_pix_out
+    -- on the hi-res build; ignored (ce_pix_in passes through) on the spherical build.
+    signal eng_ce_pix_out : std_logic;
 
     -- ---- CDC synchronizers (B4 Phase 1 minimal, clk_sys -> clk_in) ----
     -- See the architecture-level comment at the top of this file.
@@ -252,7 +266,9 @@ begin
     u_v2 : entity work.vis_warp_v2_wp
         generic map (
             MAX_SRC_W => 512,
-            N_LINES   => 128
+            N_LINES   => WARP_N_LINES,
+            CYL_MODE  => (WARP_N_LINES = 2),   -- derived: 2-line buffer ⇒ cylindrical reclaim
+            OUT_SCALE => WARP_OUT_SCALE
         )
         port map (
             clk         => clk_in,
@@ -278,11 +294,14 @@ begin
             b_out       => b_out,
             hs_out      => hs_out,
             vs_out      => vs_out,
-            de_out      => de_out
+            de_out      => de_out,
+            ce_pix_out  => eng_ce_pix_out
         );
 
-    -- ce_pix_out passes through (the pipeline is ce_pix-gated, so the
-    -- output's effective pixel-clock-enable matches the input).
-    ce_pix_out <= ce_pix_in;
+    -- Spherical / source-res build (OUT_SCALE=1): ce_pix_out passes the input
+    -- enable through (the output's effective enable matches the input rate) -
+    -- byte-identical to before. Hi-res build (OUT_SCALE=2): the engine emits at
+    -- 2x rate, so ascal MUST sample on the engine's ce_pix_out (eng_ce_pix_out).
+    ce_pix_out <= ce_pix_in when WARP_OUT_SCALE = 1 else eng_ce_pix_out;
 
 end architecture;

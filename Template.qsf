@@ -10,6 +10,10 @@
 
 
 set_global_assignment -name VERILOG_MACRO "MISTER_WARP=1"
+# Hi-res / line-doubling fix: add MISTER_WARP_CYL on top of MISTER_WARP to build the
+# cylindrical-reclaim engine with 2x internal warp (OUT_SCALE=2). Uncomment to test the
+# doubling fix on hardware; re-comment for the stock spherical source-res warp.
+#set_global_assignment -name VERILOG_MACRO "MISTER_WARP_CYL=1"
 set_global_assignment -name TOP_LEVEL_ENTITY sys_top
 set_global_assignment -name PARTITION_NETLIST_TYPE SOURCE -section_id Top
 set_global_assignment -name PARTITION_FITTER_PRESERVATION_LEVEL PLACEMENT_AND_ROUTING -section_id Top

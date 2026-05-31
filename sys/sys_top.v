@@ -1736,9 +1736,20 @@ reg        vis_warp_cmd_wr = 0;
 
 `ifdef MISTER_WARP
 wire [7:0] vw_r, vw_g, vw_b;
-wire       vw_hs, vw_vs, vw_de;
+wire       vw_hs, vw_vs, vw_de, vw_ce_pix_out;
 
+// MISTER_WARP_CYL (optional, on top of MISTER_WARP): the cylindrical-reclaim +
+// hi-res build. WARP_N_LINES=2 (2-line buffer ⇒ cyl, kv=0) + WARP_OUT_SCALE=2
+// (warp/emit at 2x width ⇒ ascal downscales ⇒ the line-doubling fix). ascal MUST
+// then sample on the engine's 2x emit enable (vw_ce_pix_out), and the source must
+// have >=2x clk_vid headroom over ce_pix (Template: ce_pix is 1-in-2 on a 20 MHz
+// clk_vid ⇒ headroom present). Without the macro: the stock spherical source-res
+// engine, byte-identical (no generics, VHDL defaults).
+`ifdef MISTER_WARP_CYL
+vis_warp #(.WARP_N_LINES(2), .WARP_OUT_SCALE(2)) u_vis_warp_siteC
+`else
 vis_warp u_vis_warp_siteC
+`endif
 (
 	.clk_sys     (clk_sys),
 	.clk_in      (clk_vid),       // source pixel clock (= clk_video)
@@ -1752,7 +1763,7 @@ vis_warp u_vis_warp_siteC
 	.hs_in       (hs_fix),
 	.vs_in       (vs_fix),
 	.de_in       (de_emu),
-	.ce_pix_out  (),               // unused; ce_hpix is driven from ce_pix
+	.ce_pix_out  (vw_ce_pix_out), // hi-res 2x emit enable (= ce_pix at OUT_SCALE=1)
 	.r_out       (vw_r),
 	.g_out       (vw_g),
 	.b_out       (vw_b),
@@ -1761,7 +1772,11 @@ vis_warp u_vis_warp_siteC
 	.de_out      (vw_de)
 );
 
-assign ce_hpix  = ce_pix;
+`ifdef MISTER_WARP_CYL
+assign ce_hpix  = vw_ce_pix_out;  // hi-res: ascal samples the 2x-wide warped raster
+`else
+assign ce_hpix  = ce_pix;         // source-res: output enable matches the input
+`endif
 assign hr_out   = vw_r;
 assign hg_out   = vw_g;
 assign hb_out   = vw_b;

@@ -52,6 +52,14 @@ entity vis_warp_v2_wp is
         CYL_MODE  : boolean := false;   -- true = cylindrical reclaim (kv=0, 2-line buffer,
                                         --   horizontal-only bilinear). Compile-time; spherical
                                         --   build (false) is byte-identical.
+        OUT_SCALE : integer := 1;       -- hi-res output upscale (1 = source-res, 2 = 2x-wide).
+                                        --   OUT_SCALE=2 is the line-doubling fix (SPEC-hires-warp):
+                                        --   warp+emit at 2x width, ascal downscales. READ-DOUBLE -
+                                        --   the W-wide buffer is UNCHANGED; the output raster runs
+                                        --   0..2W-1, src_x is in 2W space, and the bank read halves
+                                        --   src_x back to a source column (NN-upscale-then-warp).
+                                        --   Requires >=2x clk_video headroom over ce_pix (true for
+                                        --   arcade cores). OUT_SCALE=1 is byte-identical to today.
         ARX       : integer := 4;       -- aspect ratio (for warp math)
         ARY       : integer := 3
     );
@@ -79,7 +87,13 @@ entity vis_warp_v2_wp is
         b_out       : out std_logic_vector(7 downto 0);
         hs_out      : out std_logic;
         vs_out      : out std_logic;
-        de_out      : out std_logic
+        de_out      : out std_logic;
+
+        -- Emit pixel-enable. = the rate at which the warped output stream is
+        -- produced. OUT_SCALE=1: equals the delayed input ce (ce_pix_dly).
+        -- OUT_SCALE=2: pulses at 2x that rate, so ascal samples all 2W columns
+        -- of the hi-res line. Downstream (ascal) MUST sample on THIS enable.
+        ce_pix_out  : out std_logic
     );
 
     attribute keep    : boolean;
@@ -251,8 +265,17 @@ architecture rtl of vis_warp_v2_wp is
     -- Derived from the FIFO-popped sync, mirroring the input write-cursor
     -- rules but in the delayed domain. cnt_y_o lags cnt_y_w by ~N_LINES/2.
     -- The warp pipeline + stage-12 buffer-window clamp now key off these.
-    signal cnt_x_o : integer range 0 to MAX_SRC_W := 0;
+    signal cnt_x_o : integer range 0 to OUT_SCALE * MAX_SRC_W := 0;  -- 0..2W-1 when OUT_SCALE=2
     signal cnt_y_o : integer range 0 to 4095      := 0;
+
+    -- ---- Hi-res output enable (OUT_SCALE x ce_pix_dly) ----
+    -- ce_pix_dly_d1 = ce_pix_dly delayed one clk (the "other phase"). The union
+    -- of the two gives a pulse every clk = 2x the source-pixel rate, which is the
+    -- emit rate for OUT_SCALE=2. For OUT_SCALE=1, ce_pix_out_i := ce_pix_dly
+    -- exactly (byte-identical). The 2x emit needs >=2x clk headroom over ce_pix
+    -- so the two phases land on distinct clks (true for arcade clk_video).
+    signal ce_pix_dly_d1 : std_logic := '0';
+    signal ce_pix_out_i  : std_logic;
 
     -- ============================================================
     -- WARP PIPELINE (salvaged verbatim from prior DDR3 design)
@@ -262,7 +285,7 @@ architecture rtl of vis_warp_v2_wp is
     constant N_WARP_STAGES : integer := 16;
 
     type warp_side_t is record
-        cnt_x_o  : integer range 0 to MAX_SRC_W + 4095;
+        cnt_x_o  : integer range 0 to OUT_SCALE * MAX_SRC_W + 4095;
         cnt_y_o  : integer range 0 to 4095;
         dx       : signed(15 downto 0);
         dy       : signed(15 downto 0);
@@ -336,6 +359,16 @@ architecture rtl of vis_warp_v2_wp is
     signal s12_fxp, s12_fyp        : std_logic := '0';  -- floor_x[0], floor_y[0]
     signal s12_hs, s12_vs, s12_de  : std_logic := '0';
     signal s12_bilinear            : std_logic := '0';
+    -- Hi-res (OUT_SCALE>1) bank-read alignment: the M9K read (s12_addr -> registered
+    -- s13_q) lags s12_addr by one clk, so the stage-13 mux's parity/fraction/sync
+    -- must be delayed one clk to pair with the SAME pixel's bank data. (At OUT_SCALE=1
+    -- the stock undelayed path is kept -> byte-identical; the 1-pixel parity skew is
+    -- masked there because the fraction varies smoothly. At OUT_SCALE=2 the
+    -- parity-gated fraction makes the skew fatal -> a line splits.)
+    signal s12d_fx, s12d_fy        : unsigned(7 downto 0) := (others => '0');
+    signal s12d_fxp, s12d_fyp      : std_logic := '0';
+    signal s12d_hs, s12d_vs, s12d_de : std_logic := '0';
+    signal s12d_bilinear           : std_logic := '0';
 
     -- Stage 13: bank read data captured (1-cycle latency). After muxing
     -- by (s12_fxp, s12_fyp), routed to (p00, p01, p10, p11).
@@ -495,6 +528,20 @@ begin
     de_o_gen   <= sync_fifo_out(1);
     ce_pix_dly <= sync_fifo_out(0);
 
+    -- ---- Hi-res emit enable ----
+    -- ce_pix_dly_d1 is ce_pix_dly delayed one clk (free-running, NOT ce-gated).
+    process(clk)
+    begin
+        if rising_edge(clk) then
+            ce_pix_dly_d1 <= ce_pix_dly;
+        end if;
+    end process;
+    -- OUT_SCALE is a compile-time constant, so this folds to a plain wire (=1)
+    -- or a 2-input OR (=2); no runtime mux. =1 reproduces today's behaviour.
+    ce_pix_out_i <= ce_pix_dly when OUT_SCALE = 1
+                    else (ce_pix_dly or ce_pix_dly_d1);
+    ce_pix_out   <= ce_pix_out_i;
+
     -- Edge detect on the delayed sync (combinational from _d copies).
     vs_o_rising  <= '1' when (vs_o_gen = '1' and vs_o_gen_d = '0') else '0';
     de_o_falling <= '1' when (de_o_gen = '0' and de_o_gen_d = '1') else '0';
@@ -513,7 +560,11 @@ begin
                 de_o_gen_d <= '0';
                 cnt_x_o    <= 0;
                 cnt_y_o    <= 0;
-            elsif ce_pix_dly = '1' then
+            elsif ce_pix_out_i = '1' then
+                -- Runs at the EMIT rate (OUT_SCALE x ce_pix_dly). With OUT_SCALE=2
+                -- the active window holds 2x as many emit pulses, so cnt_x_o sweeps
+                -- 0..2W-1 across one line (the hi-res raster). cnt_y_o still counts
+                -- source lines (output is 2x WIDE, not 2x tall).
                 vs_o_gen_d <= vs_o_gen;
                 de_o_gen_d <= de_o_gen;
                 if vs_o_rising = '1' then
@@ -523,7 +574,15 @@ begin
                     cnt_x_o <= 0;
                     cnt_y_o <= cnt_y_o + 1;
                 elsif de_o_gen = '1' then
-                    cnt_x_o <= cnt_x_o + 1;
+                    -- Saturate instead of overflow: during the sync-FIFO fill
+                    -- transient (target_lag still the default, not yet measured) the
+                    -- read window is misaligned and de_o_gen can stay asserted past
+                    -- one line, running the cursor away. The legit max is 2*src_w-1
+                    -- <= OUT_SCALE*MAX_SRC_W, so this never clips real pixels; it just
+                    -- stops a transient from exceeding cnt_x_o's range (bound check).
+                    if cnt_x_o < OUT_SCALE * MAX_SRC_W then
+                        cnt_x_o <= cnt_x_o + 1;
+                    end if;
                 end if;
             end if;
         end if;
@@ -601,8 +660,13 @@ begin
     -- 1-cycle rescal_start whenever they change. The divider is frame-rare and
     -- off the pixel path, so its multi-cycle latency is irrelevant; reg_ax2_u/
     -- reg_ay2_u hold the previous result until the new one lands (during vblank).
-    rescal_w_u <= to_unsigned(src_w_latched, 12);
-    rescal_h_u <= to_unsigned(src_h_latched, 12);
+    -- Hi-res: feed the divider the OUTPUT geometry (OUT_SCALE x detected dims) so
+    -- AX2 calibrates for the 2W-wide warp space. cx,cy both scale by OUT_SCALE =>
+    -- AX2 = AX2_src / OUT_SCALE^2, keeping the EDGE r2 identical at 2x density
+    -- (the warp curve is unchanged, just sampled at OUT_SCALE x columns). OUT_SCALE=1
+    -- => unchanged. (rescal halves internally: cx = src_w/2.)
+    rescal_w_u <= to_unsigned(OUT_SCALE * src_w_latched, 12);
+    rescal_h_u <= to_unsigned(OUT_SCALE * src_h_latched, 12);
 
     process(clk)
     begin
@@ -726,6 +790,10 @@ begin
                 s12_fxp <= '0'; s12_fyp <= '0';
                 s12_hs <= '0'; s12_vs <= '0'; s12_de <= '0';
                 s12_bilinear <= '0';
+                s12d_fx <= (others => '0'); s12d_fy <= (others => '0');
+                s12d_fxp <= '0'; s12d_fyp <= '0';
+                s12d_hs <= '0'; s12d_vs <= '0'; s12d_de <= '0';
+                s12d_bilinear <= '0';
                 -- (s13_q_ee/eo/oe/oo and s13_pixel are driven by the
                 -- dedicated pixel-bank single-process block below; reset
                 -- there.)
@@ -749,15 +817,20 @@ begin
                 s15_p00 <= (others => '0');
                 s16_pixel <= (others => '0');
                 s16_hs <= '0'; s16_vs <= '0'; s16_de <= '0';
-            elsif ce_pix_dly = '1' then
+            elsif ce_pix_out_i = '1' then
                 -- Stage 1 input — DELAYED (read/output) domain.
                 -- v3.3b: the warp renders the DELAYED output position
                 -- (cnt_x_o/cnt_y_o), and the carried sync is the FIFO-
                 -- popped sync (hs_o_gen/vs_o_gen/de_o_gen). The pipeline
-                -- now advances on ce_pix_dly. The write side (cnt_x_w/
-                -- cnt_y_w, bank writes) stays in the input domain.
+                -- advances on the EMIT enable (ce_pix_out_i = OUT_SCALE x
+                -- ce_pix_dly), so OUT_SCALE=2 processes 2W columns per line.
+                -- The write side (cnt_x_w/cnt_y_w, bank writes) stays in the
+                -- input domain.
                 v_in_act := (de_o_gen = '1');
-                v_dst_cx := src_w_latched / 2;
+                -- X center is in 2W output space (OUT_SCALE x src_w / 2); cnt_x_o
+                -- sweeps 0..OUT_SCALE*src_w-1 so dx is symmetric about it. Y is
+                -- unchanged (source space; output is 2x wide, not 2x tall).
+                v_dst_cx := (OUT_SCALE * src_w_latched) / 2;
                 v_dst_cy := src_h_latched / 2;
                 v_dx_int := cnt_x_o - v_dst_cx;
                 v_dy_int := cnt_y_o - v_dst_cy;
@@ -906,7 +979,9 @@ begin
                 s10_dy_m <= resize(side_pipe(12).dy * to_signed(v_my, 17), s10_dy_m'length);
 
                 -- Stage 10b: src_q15 = (DST_C << 15) + dx·M
-                s10b_src_x_q15 <= to_signed((src_w_latched / 2) * 32768, s10b_src_x_q15'length) + s10_dx_m;
+                -- X center in 2W output space = OUT_SCALE*src_w/2 (so src_x lands in
+                -- [0, OUT_SCALE*src_w); the bank read halves it back to a source col).
+                s10b_src_x_q15 <= to_signed(((OUT_SCALE * src_w_latched) / 2) * 32768, s10b_src_x_q15'length) + s10_dx_m;
                 s10b_src_y_q15 <= to_signed((src_h_latched / 2) * 32768, s10b_src_y_q15'length) + s10_dy_m;
 
                 -- Stage 11: shift + clamp + warp_en mux. Now also extracts
@@ -937,9 +1012,10 @@ begin
                 if v_src_x_pre < 0 then
                     v_src_x_pre := 0;
                     v_fx_u := (others => '0');
-                elsif v_src_x_pre >= src_w_latched - 1 then
-                    -- saturate: can't bilerp past the last column either
-                    v_src_x_pre := src_w_latched - 1;
+                elsif v_src_x_pre >= OUT_SCALE * src_w_latched - 1 then
+                    -- saturate at the 2W-space right edge: can't bilerp past the
+                    -- last (2W) column either. OUT_SCALE=1 => src_w_latched-1.
+                    v_src_x_pre := OUT_SCALE * src_w_latched - 1;
                     v_fx_u := (others => '0');
                 end if;
                 if v_src_y_pre < 0 then
@@ -951,9 +1027,9 @@ begin
                 end if;
                 -- Identity from side_pipe(14)
                 if side_pipe(14).v_in_act = '1' then
-                    v_src_x_id := side_pipe(14).cnt_x_o;
+                    v_src_x_id := side_pipe(14).cnt_x_o;          -- 2W output space when OUT_SCALE=2
                     v_src_y_id := side_pipe(14).cnt_y_o;
-                    if v_src_x_id >= src_w_latched then v_src_x_id := src_w_latched - 1; end if;
+                    if v_src_x_id >= OUT_SCALE * src_w_latched then v_src_x_id := OUT_SCALE * src_w_latched - 1; end if;
                     if v_src_y_id >= src_h_latched then v_src_y_id := src_h_latched - 1; end if;
                 else
                     v_src_x_id := 0;
@@ -980,7 +1056,21 @@ begin
                 if side_pipe(14).warp_en = '1' then
                     s11_src_x <= v_src_x_pre;
                     s11_src_y <= v_src_y_pre;
-                    s11_fx    <= v_fx_s;
+                    -- READ-DOUBLE fraction gating (OUT_SCALE>1). The two horizontal
+                    -- bilinear neighbours are source cols floor(src_x/OS) and
+                    -- floor((src_x+1)/OS): the SAME col except on the last sub-column
+                    -- of each source col (src_x mod OS = OS-1), where they straddle a
+                    -- source boundary. The 4-bank fetch ALWAYS reads two opposite-parity
+                    -- cols (p00=floor, p01=floor+1), so when the neighbours collapse to
+                    -- one col it mis-reads p01 from the wrong bank. Forcing fx=0 there
+                    -- nulls p01 (weight 0) => blend = p00 = source[floor] (pure), exactly
+                    -- the bit-exact NN-upscale-then-bilinear. Only the boundary sub-col
+                    -- carries the real fraction. OUT_SCALE=1 keeps v_fx_s (byte-identical).
+                    if OUT_SCALE > 1 and (v_src_x_pre mod OUT_SCALE) /= (OUT_SCALE - 1) then
+                        s11_fx <= (others => '0');
+                    else
+                        s11_fx <= v_fx_s;
+                    end if;
                     s11_fy    <= v_fy_s;
                 else
                     s11_src_x <= v_src_x_id;
@@ -1032,16 +1122,25 @@ begin
                     v_src_y_fin := v_line_min;
                 end if;
                 v_src_x_fin := s11_src_x;
-                if v_src_x_fin >= MAX_SRC_W then
-                    v_src_x_fin := MAX_SRC_W - 1;
+                if v_src_x_fin >= OUT_SCALE * MAX_SRC_W then
+                    v_src_x_fin := OUT_SCALE * MAX_SRC_W - 1;
                 end if;
                 -- floor and floor+1, both clamped to the same legal range
                 -- so a clamp at the right/bottom edge means floor+1 ==
                 -- floor, which still reads from the legal bank (the bilerp
                 -- weight on that neighbour is then irrelevant because fx/fy
                 -- were forced to 0 in stage 11 for the saturating case).
-                v_fx_lo := v_src_x_fin;
-                v_fx_hi := v_src_x_fin + 1;
+                -- READ-DOUBLE (SPEC-hires-warp / STATUS Stage 3): src_x is in 2W
+                -- output space; the W-wide buffer is indexed by the SOURCE column
+                -- = src_x / OUT_SCALE. The two horizontal bilinear neighbours are
+                -- the source cols under output cols src_x and src_x+1, i.e.
+                -- floor(src_x/OS) and floor((src_x+1)/OS) -- equal (NN) when src_x is
+                -- even, adjacent when odd. The 8-bit fraction s11_fx (bits[14:7] of
+                -- the 2W-space q15) already weights that blend. This is the integer
+                -- NN-upscale-then-warp the bit-exact model proves doubling-free.
+                -- OUT_SCALE=1 => v_fx_lo=src_x, v_fx_hi=src_x+1 (byte-identical).
+                v_fx_lo := v_src_x_fin / OUT_SCALE;
+                v_fx_hi := (v_src_x_fin + 1) / OUT_SCALE;
                 if v_fx_hi > MAX_SRC_W - 1 then v_fx_hi := MAX_SRC_W - 1; end if;
                 v_fy_lo := v_src_y_fin;
                 v_fy_hi := v_src_y_fin + 1;
@@ -1107,6 +1206,14 @@ begin
                 s12_de <= side_pipe(N_WARP_STAGES).de;
                 s12_bilinear <= bilinear_en;
 
+                -- One-clk-delayed copies of the stage-12 parity/fraction/sync, so the
+                -- stage-13 mux can pair them with the bank data (s13_q), which lags
+                -- s12_addr by the M9K read latency. Used only when OUT_SCALE>1.
+                s12d_fx  <= s12_fx;  s12d_fy  <= s12_fy;
+                s12d_fxp <= s12_fxp; s12d_fyp <= s12_fyp;
+                s12d_hs  <= s12_hs;  s12d_vs  <= s12_vs;  s12d_de <= s12_de;
+                s12d_bilinear <= s12_bilinear;
+
                 -- Stage 13: route bank reads to (p00, p01, p10, p11) based
                 -- on floor parities, and carry fx/fy/sync/bilinear_en. The
                 -- raw bank outputs (s13_q_*) come from the pixel-bank
@@ -1118,8 +1225,14 @@ begin
                 -- p11 = pixel at (floor_x+1, floor_y+1)
                 --
                 -- The bank for each is determined by the parity bits
-                -- s12_fxp (=floor_x[0]) and s12_fyp (=floor_y[0]).
-                v_parity_sel := s12_fyp & s12_fxp;
+                -- s12_fxp (=floor_x[0]) and s12_fyp (=floor_y[0]). At OUT_SCALE>1
+                -- use the one-clk-delayed parity so it aligns with s13_q (the bank
+                -- read lags s12_addr by one clk). OUT_SCALE=1 keeps the stock path.
+                if OUT_SCALE > 1 then
+                    v_parity_sel := s12d_fyp & s12d_fxp;
+                else
+                    v_parity_sel := s12_fyp & s12_fxp;
+                end if;
                 case v_parity_sel is
                     when "00" =>
                         -- floor parity (even, even)
@@ -1146,12 +1259,23 @@ begin
                         s13_p10 <= s13_q_eo;
                         s13_p11 <= s13_q_ee;
                 end case;
-                s13_fx    <= s12_fx;
-                s13_fy    <= s12_fy;
-                s13_hs    <= s12_hs;
-                s13_vs    <= s12_vs;
-                s13_de    <= s12_de;
-                s13_bilinear <= s12_bilinear;
+                -- Carry the fraction/sync that matches the bank data routed above:
+                -- delayed at OUT_SCALE>1 (aligned with s13_q), stock at OUT_SCALE=1.
+                if OUT_SCALE > 1 then
+                    s13_fx    <= s12d_fx;
+                    s13_fy    <= s12d_fy;
+                    s13_hs    <= s12d_hs;
+                    s13_vs    <= s12d_vs;
+                    s13_de    <= s12d_de;
+                    s13_bilinear <= s12d_bilinear;
+                else
+                    s13_fx    <= s12_fx;
+                    s13_fy    <= s12_fy;
+                    s13_hs    <= s12_hs;
+                    s13_vs    <= s12_vs;
+                    s13_de    <= s12_de;
+                    s13_bilinear <= s12_bilinear;
+                end if;
 
                 -- Stage 14: horizontal lerp.
                 v_one_minus_fx := to_unsigned(256, 9) - resize(s13_fx, 9);
@@ -1248,8 +1372,8 @@ begin
                     pb_ee(v_wr_addr) <= r_in & g_in & b_in;
                 end if;
             end if;
-            -- READ port (delayed domain — aligns with stage 13 muxer)
-            if ce_pix_dly = '1' then
+            -- READ port (emit domain — aligns with the ce_pix_out_i-gated stage 13 muxer)
+            if ce_pix_out_i = '1' then
                 s13_q_ee <= pb_ee(s12_addr_ee);
             end if;
         end if;
@@ -1270,8 +1394,8 @@ begin
                     pb_eo(v_wr_addr) <= r_in & g_in & b_in;
                 end if;
             end if;
-            -- READ port (delayed domain — aligns with stage 13 muxer)
-            if ce_pix_dly = '1' then
+            -- READ port (emit domain — aligns with the ce_pix_out_i-gated stage 13 muxer)
+            if ce_pix_out_i = '1' then
                 s13_q_eo <= pb_eo(s12_addr_eo);
             end if;
         end if;
@@ -1292,8 +1416,8 @@ begin
                     pb_oe(v_wr_addr) <= r_in & g_in & b_in;
                 end if;
             end if;
-            -- READ port (delayed domain — aligns with stage 13 muxer)
-            if ce_pix_dly = '1' then
+            -- READ port (emit domain — aligns with the ce_pix_out_i-gated stage 13 muxer)
+            if ce_pix_out_i = '1' then
                 s13_q_oe <= pb_oe(s12_addr_oe);
             end if;
         end if;
@@ -1314,8 +1438,8 @@ begin
                     pb_oo(v_wr_addr) <= r_in & g_in & b_in;
                 end if;
             end if;
-            -- READ port (delayed domain — aligns with stage 13 muxer)
-            if ce_pix_dly = '1' then
+            -- READ port (emit domain — aligns with the ce_pix_out_i-gated stage 13 muxer)
+            if ce_pix_out_i = '1' then
                 s13_q_oo <= pb_oo(s12_addr_oo);
             end if;
         end if;
@@ -1347,7 +1471,7 @@ begin
                 hs_out <= '0';
                 vs_out <= '0';
                 de_out <= '0';
-            elsif ce_pix_dly = '1' then
+            elsif ce_pix_out_i = '1' then
                 if s16_de = '1' then
                     r_out <= s16_pixel(23 downto 16);
                     g_out <= s16_pixel(15 downto 8);

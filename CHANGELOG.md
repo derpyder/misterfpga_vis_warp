@@ -31,11 +31,24 @@ state: [`STATUS.md`](./STATUS.md).
   ([`sim/warp_bitexact.py`](./sim/warp_bitexact.py)) reproduces it: center
   magnification (overscan fill) + sharp-bilinear point-sampling of 1px features is
   a **Nyquist wall**, not a tuning bug. The float models missed it.
-- **Hi-res internal warp specced — the fix.** Warp *and output* at 2× width, with
-  ascal doing the final downscale (crt-royale's method) → sim-proven 30/30 source
-  lines stay one solid run. Affordable **only because** the cylindrical Stage-2
-  reclaim frees the M9K, so the two are now one coupled effort. Not built. Spec:
-  [`SPEC-hires-warp-2026-05-30.md`](./SPEC-hires-warp-2026-05-30.md).
+- **Hi-res internal warp — IMPLEMENTED + GHDL-gated (the fix).** Warp *and output*
+  at 2× width, ascal does the final downscale (crt-royale's method). Built as a
+  **read-double** in `vis_warp_v2_wp` (`OUT_SCALE=2`): the W-wide buffer is unchanged,
+  the output raster runs `0..2W-1`, and the bank read halves `src_x` back to a source
+  col. A 2× emit enable (`ce_pix_out`) carries the wider stream to ascal. **Gate
+  (`sim/tb_warp_stage0.vhd` + `sim/tb_hires_check.py` at Robotron's 296×240):** the
+  1px torture grid is doubling-free — 18/19 runs, no split, no wide — at grid 16 **and**
+  8, sharpness 2 **and** 4; the RTL matches the bit-exact model to the pixel. OS=1
+  stays byte-identical (712/720). Affordable **only because** the cylindrical Stage-2
+  reclaim frees the M9K, so the two are one coupled effort (reclaim done first).
+  **Two real RTL bugs were sim-found and fixed:** (1) the read-double collapses the
+  two h-neighbours to one source col on even `src_x`, which the opposite-parity 4-bank
+  fetch can't represent → force `fx=0` there; (2) a **pre-existing** bank-read
+  parity/fraction skew (the registered M9K read lags the address one clk) that OS=1's
+  smooth fraction masked but OS=2's parity-gated fraction made fatal → one-clk-delayed
+  `s12d_*` realign the mux (gated `OUT_SCALE>1`). **Hardware build still pending.**
+  Specs: [`SPEC-hires-warp-2026-05-30.md`](./SPEC-hires-warp-2026-05-30.md),
+  [`STATUS.md`](./STATUS.md) → Stage 3.
 - **Docs reorganized.** [`STATUS.md`](./STATUS.md) is now the single source of
   truth; rolling `HANDOFF-*.md` docs moved to `docs/archive/`; the `sim/` model
   zoo triaged with the authoritative model called out (`sim/README.md`).

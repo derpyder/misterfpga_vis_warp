@@ -20,18 +20,29 @@ HDMI mode.
   warp of 1-pixel content (grid lines, text) renders single rows as two — a
   Nyquist wall, **proven bit-exact**, not a tuning bug. So no current build is
   shippable as a polished release yet.
-- **The fix — hi-res 2× warp — is in progress (sim-first).** Warp at 2× internal
+- **The fix — hi-res 2× warp — is DONE in sim (GHDL GATE PASS).** Warp at 2× internal
   res and output at 2×, ascal downscales (crt-royale's method). Affordable because
   the cylindrical Stage-2 buffer reclaim freed the M9K, so the two are one effort.
-  **Done in sim:** the reclaim (pixel buffer ~165 → ~3 M9K, GATE PASS, spherical
-  byte-identical) + the hi-res design + the TB foundation. **Not built:** the
-  engine 2× output path.
-- **▶ RESUME HERE (next instance):** implement the engine hi-res `OUT_SCALE=2` path
-  — see [The plan → Stage 3](#the-plan-sim-first-then-one-hardware-build) (design
-  locked: read-double + a 2× `ce_pix_out`; the GHDL rig `sim/tb_warp_stage0.vhd`
-  with `-gCE_DIV=2` gates it). All work is on `main` = `feature` @ `4586d22`,
-  pushed. USER's parallel gate: a Quartus build of the cyl reclaim (expect RAM
-  ~105–125/553) to confirm the M9K win on silicon.
+  **Done in sim:** the reclaim (~165 → ~3 M9K, byte-identical) **+ the engine
+  `OUT_SCALE=2` read-double path** — at Robotron's 296 the 1px torture grid is
+  doubling-free (18/19 runs, no split, no wide) at grid 16 **and** 8, sharpness 2
+  **and** 4; the RTL output matches the bit-exact model to the pixel (1-col latency
+  offset). OS=1 stays byte-identical (712/720). **Two real RTL bugs were found and
+  fixed to get there** (read-double bank-collapse + a latent bank-read parity/fraction
+  skew — see [Stage 3](#the-plan-sim-first-then-one-hardware-build)).
+- **▶ RESUME HERE (next instance):** the engine is sim-proven **and `sys_top` is
+  wired** — the remaining work is the **USER's Quartus build + cab test**. To build the
+  fix: uncomment `#set_global_assignment -name VERILOG_MACRO "MISTER_WARP_CYL=1"` in
+  `Template.qsf` (sits on top of `MISTER_WARP=1`) and compile → `template.rbf`. That
+  selects the cyl engine (`WARP_N_LINES=2`) + 2× internal warp (`WARP_OUT_SCALE=2`) and
+  routes ascal's CE from the engine's 2× `ce_pix_out`. **What the build newly tests
+  (NOT sim-covered):** (a) Verilog→VHDL generic passing, (b) whether ascal cleanly
+  accepts the 2× `ce_hpix` + the 960-wide raster, (c) timing closure. The datapath
+  itself is GHDL-clean at the Template's **480×360** (and Robotron's 296): grid
+  doubling-free, OS=1 byte-identical. If the cab shows the doubling GONE on the OSD
+  vbar (pattern 2) → ship. If ascal chokes on the 2× CE, that's the integration to
+  debug (datapath is solid). Gate to re-run after any engine change: `sim/tb_warp_stage0.vhd`
+  `-gDUT_N_LINES=2 -gOUT_SCALE=2 -gCE_DIV=2 -gW_ACT_G=480 -gH_ACT_G=360` + `sim/tb_hires_check.py`.
 
 ---
 
@@ -84,9 +95,11 @@ don't.
   softer LUT; prescale-2×-then-decimate-back-to-480; any LUT/fill/sharpness combo
   at source resolution. It's the resample, not the params.
 - **Proven fix:** TRUE hi-res 2× (warp AND output at 2× width, ascal downscales)
-  → 30/30 source lines stay one solid run. 2× is enough. **Re-confirmed at
-  Robotron's actual 296 width (step 0 below): src-res doubles, hi-res 2× is
-  doubling-free.**
+  → 30/30 source lines stay one solid run. 2× is enough. Re-confirmed at Robotron's
+  actual 296 width: src-res doubles, hi-res 2× is doubling-free. **Now implemented in
+  the RTL (`OUT_SCALE=2`) and GHDL-gated clean** — no longer just a model result. The
+  remaining gate to a shippable release is the ONE hardware build (display-path +
+  cab confirm).
 
 Full proof + ruled-out table: [`SPEC-hires-warp-2026-05-30.md`](./SPEC-hires-warp-2026-05-30.md).
 
@@ -106,12 +119,16 @@ buffer to a 2-line ping-pong, freeing ~180 M9K. Build order
    grid. Finding: the overscan fill crops the outermost ~1.4 src-px (the x=0
    line) — a benign 1-line edge deficit in *both* paths, **not** doubling. (So the
    real gate is "no wide/split runs", not the stricter `runs==src`.)
-1. **(NEXT)** `MAX_SRC_W` 512→1024 + 2× write-doubling + 2× output, **keeping**
-   the 128-line buffer → validates the look at known buffer cost. **This is the
-   gate:** grid clean, no doubling on HW.
-2. **Stage-2 reclaim** (128→2 line, kv=0) → recover the M9K the 2× width spent.
+1. **2× output path** → validates the look fix. ✅ **DONE in sim** — but via the
+   **READ-double** (`OUT_SCALE=2`, buffer stays W-wide; src_x in 2W space, the bank
+   read halves it) on the **cyl passthrough**, *not* the write-double/`MAX_SRC_W→1024`
+   originally sketched here. The reclaim-first sequencing (below) made the read-double
+   the cheaper, lower-risk path. GHDL gate clean at 296. **HW confirm still pending.**
+2. **Stage-2 reclaim** (128→2 line, kv=0) → recover the M9K. ✅ **DONE in sim**
+   (done *before* the 2× width, per the reclaim-first decision below).
 3. Re-introduce kv>0 within the buffer budget, **or** document hi-res as
-   cylinder-only (kv=0).
+   cylinder-only (kv=0). **Decision: cylinder-only.** Hi-res rides the cyl passthrough
+   (kv=0 ⇒ src_y=out_y ⇒ 2-line buffer); kv>0 keeps source-res. Documented, not a TODO.
 
 **Open questions to resolve in sim before RTL:** kv≠0 breaks the 2-line reclaim
 (vertical bow needs lookahead again); 2× throughput at clk_video; the sim must
@@ -146,21 +163,46 @@ FIFO. Revised order: **Stage-0 sim → Stage-2 reclaim → hi-res width.**
   `side_pipe(15).cnt_y_o` aligns them. Spherical's ±64 window had hidden it.
   **Next:** USER Quartus build to confirm RAM ~105/553 + timing; then (optional)
   shrink the 65536-deep sync FIFO (~20 M9K) for the 1-line lag; then hi-res width.
-- **Stage 3 (hi-res 2× width) — design locked; TB foundation laid; engine next.**
-  Kills the remaining *horizontal* 1px doubling (cyl already killed the vertical),
-  on the cyl passthrough. **Read-double mechanism** (cheaper than the SPEC's
-  write-double): keep the W-wide buffer; the output raster becomes 2W; output col
-  `ox∈[0,2W)` warps in 2W space and reads `buffer[src_x/2]` (LSB → bilinear frac) =
-  NN-upscale-then-warp (warp_bitexact-proven) without enlarging the buffer.
-  **Output-ce is the crux:** ascal samples on `ce_pix_out`, today tied to `ce_pix_in`
-  (`vis_warp.vhd:286`); hi-res needs it = a **2× ce** (`ce_pix_dly OR +1clk`; needs
-  ≥2× clk headroom — true for arcade cores). Engine gains: an `OUT_SCALE` generic, a
-  `ce_pix_out` port, a 0..2W cursor, src_x in 2W space, the read-double, regenerated
-  de/hs, AX2 fed the 2× width. Wrapper wires `ce_pix_out` from the engine.
-  **Done (committed):** the Stage-0 TB is `CE_DIV`-parameterized — `CE_DIV=1`
-  reproduces 712/720; `CE_DIV≥2` is the headroom hi-res needs. **Next:** the engine
-  `OUT_SCALE=2` path + extend the TB (`CE_DIV=2`, capture 2W on `ce_pix_out`, gate
-  runs==src at Robotron's 296).
+- **Stage 3 (hi-res 2× width) — DONE in sim (GHDL GATE PASS).** Kills the remaining
+  *horizontal* 1px doubling (cyl already killed the vertical), on the cyl passthrough.
+  **Read-double mechanism** (cheaper than the SPEC's write-double): keep the W-wide
+  buffer; the output raster runs `ox∈[0,2W)`, warps in 2W space, and the bank read
+  halves `src_x` back to a source col = NN-upscale-then-warp (warp_bitexact-proven)
+  without enlarging the buffer. The 2× emit enable `ce_pix_out_i = ce_pix_dly OR
+  +1clk` drives the whole delayed domain (needs ≥2× clk headroom — true for arcade
+  cores). Engine gained: an `OUT_SCALE` generic, a `ce_pix_out` port, a 0..2W cursor,
+  src_x/center/clamp in 2W space, the read-double, AX2 fed the 2× dims. Wrapper takes
+  `WARP_OUT_SCALE`/`WARP_CYL`/`WARP_N_LINES` generics + routes `ce_pix_out`.
+  **GATE (`sim/tb_warp_stage0.vhd` + `sim/tb_hires_check.py`):** src-res doubles
+  (reproduces HW), hi-res 2× is **clean — no split, no wide** at **both the Template's
+  480×360 and Robotron's 296×240**, grid 16 **and** 8, sharpness 2 **and** 4; RTL ==
+  bit-exact model to the pixel (1-col latency offset). OS=1 byte-identical (712/720).
+  **`sys_top.v` is wired** (`MISTER_WARP_CYL` macro → `WARP_N_LINES=2`/`WARP_OUT_SCALE=2`
+  + ascal CE from the engine's 2× `ce_pix_out`); `Template.qsf` has the commented toggle.
+  **Two real RTL bugs had to be fixed (both sim-found, neither in the original
+  design intent):**
+  1. **Read-double bank-collapse.** When `src_x` is even the two h-neighbours
+     `floor(src_x/2)`,`floor((src_x+1)/2)` are the SAME source col, but the 4-bank
+     fetch always reads two *opposite-parity* banks (p00=floor, p01=floor+1) → it
+     mis-reads p01 from the wrong bank. **Fix:** force `fx=0` for even `src_x` (the
+     boundary sub-col carries the only real fraction) so the bad p01 gets weight 0 ⇒
+     blend = p00 = source[floor], exactly the NN-upscale model. (stage 11, OUT_SCALE>1)
+  2. **Latent bank-read parity/fraction skew (pre-existing, masked at OS=1).** The M9K
+     read (`s12_addr`→registered `s13_q`) lags the address one clk, so the stage-13
+     mux paired each pixel's bank data with the *next* pixel's parity+fraction. At
+     OS=1 the smooth fraction hides it (a sub-pixel shift the shift-tolerant gate
+     passes); at OS=2 the parity-gated `fx` makes a line split. **Fix:** one-clk-delayed
+     `s12d_*` parity/fraction/sync feed the mux, aligned with `s13_q` (gated OUT_SCALE>1
+     ⇒ OS=1 untouched). *This was the whole afternoon — caught only by dumping GHDL
+     internals after a faithful Python replica of the datapath came out clean but the
+     RTL didn't; the value 147 at the split col decoded to the next pixel's `fx`.*
+  3. **Cursor overflow on the startup transient (surfaced at 480, bound-check).** Before
+     the sync-FIFO's `target_lag` self-measures (first ~1 line it's the 768 default), the
+     read window is misaligned and `de_o_gen` can stretch past one line, running the
+     0..2W output cursor past its range — fatal at 480's longer lines, survived at 296's.
+     **Fix:** saturate the cursor (`if cnt_x_o < OUT_SCALE*MAX_SRC_W`, same in the TB
+     capture) — never clips a real pixel (legit max 2·src_w−1), just survives the
+     transient. Hardware wraps silently, so it's a sim-strictness + clean-startup fix.
 
 ## Parked (still useful, not the path forward)
 
