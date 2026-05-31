@@ -16,32 +16,34 @@ HDMI mode.
 
 - **It runs on hardware.** Barrel warp validated on the Template grid and on
   Robotron; the cylindrical engine's res-adaptive calibration is HW-proven.
-- **There is one open quality blocker: line-doubling.** A source-resolution sharp
-  warp of 1-pixel content (grid lines, text) renders single rows as two — a
-  Nyquist wall, **proven bit-exact**, not a tuning bug. So no current build is
-  shippable as a polished release yet.
-- **The fix — hi-res 2× warp — is DONE in sim (GHDL GATE PASS).** Warp at 2× internal
-  res and output at 2×, ascal downscales (crt-royale's method). Affordable because
-  the cylindrical Stage-2 buffer reclaim freed the M9K, so the two are one effort.
-  **Done in sim:** the reclaim (~165 → ~3 M9K, byte-identical) **+ the engine
-  `OUT_SCALE=2` read-double path** — at Robotron's 296 the 1px torture grid is
-  doubling-free (18/19 runs, no split, no wide) at grid 16 **and** 8, sharpness 2
-  **and** 4; the RTL output matches the bit-exact model to the pixel (1-col latency
-  offset). OS=1 stays byte-identical (712/720). **Two real RTL bugs were found and
-  fixed to get there** (read-double bank-collapse + a latent bank-read parity/fraction
-  skew — see [Stage 3](#the-plan-sim-first-then-one-hardware-build)).
-- **▶ RESUME HERE (next instance):** the engine is sim-proven **and `sys_top` is
-  wired** — the remaining work is the **USER's Quartus build + cab test**. To build the
-  fix: uncomment `#set_global_assignment -name VERILOG_MACRO "MISTER_WARP_CYL=1"` in
-  `Template.qsf` (sits on top of `MISTER_WARP=1`) and compile → `template.rbf`. That
-  selects the cyl engine (`WARP_N_LINES=2`) + 2× internal warp (`WARP_OUT_SCALE=2`) and
-  routes ascal's CE from the engine's 2× `ce_pix_out`. **What the build newly tests
-  (NOT sim-covered):** (a) Verilog→VHDL generic passing, (b) whether ascal cleanly
-  accepts the 2× `ce_hpix` + the 960-wide raster, (c) timing closure. The datapath
-  itself is GHDL-clean at the Template's **480×360** (and Robotron's 296): grid
-  doubling-free, OS=1 byte-identical. If the cab shows the doubling GONE on the OSD
-  vbar (pattern 2) → ship. If ascal chokes on the 2× CE, that's the integration to
-  debug (datapath is solid). Gate to re-run after any engine change: `sim/tb_warp_stage0.vhd`
+- **The line-doubling blocker is FIXED — confirmed on hardware (2026-05-31).** A
+  source-res sharp warp of 1px content (grid lines, text) used to render single rows
+  as two (a Nyquist wall, proven bit-exact). The hi-res 2× build renders the OSD
+  vertical-bar pattern **crisp on the cab** — doubling gone. Critically, that also
+  proves **ascal cleanly accepts the 2× `ce_hpix` + the 960-wide raster**, which was
+  the one untested integration risk. **The blocker that gated a polished release is
+  cleared.**
+- **The fix — hi-res 2× warp — DONE (sim-gated + hardware-validated).** Warp at 2×
+  internal res and output at 2×, ascal downscales (crt-royale's method). Affordable
+  because the cylindrical Stage-2 buffer reclaim freed the M9K, so the two are one
+  effort. The reclaim (~165 → ~3 M9K, byte-identical) **+ the engine `OUT_SCALE=2`
+  read-double path** — GHDL doubling-free at the Template's 480×360 AND Robotron's 296,
+  grid 16 **and** 8, sharpness 2 **and** 4; RTL == bit-exact model to the pixel. OS=1
+  byte-identical (712/720). **Three real RTL bugs were found + fixed** (read-double
+  bank-collapse, a latent bank-read parity/fraction skew, a startup cursor overflow —
+  see [Stage 3](#the-plan-sim-first-then-one-hardware-build)). **Still to confirm:**
+  the cyl reclaim's RAM win on the fitter report (~105–125/553 vs spherical ~284).
+- **▶ RESUME HERE (next instance):** the hi-res fix is **hardware-validated on the
+  Template** (`MISTER_WARP_CYL=1`, enabled in `Template.qsf`). The blocker is cleared,
+  so the roadmap unblocks. Next moves, in order: (1) **`main` should become the
+  cyl+hi-res engine** — the merge-feature→`main` decision STATUS deliberately deferred
+  is now ripe (hi-res is the proven path). (2) **Robotron-VIS is synced + engine-gated
+  and ready to build** (`fpga/robotron-vis`, `MISTER_WARP_CYL=1` on; the 2× CE is wired
+  through its `scanlines`→ascal path — one extra integration vs the Template, but the
+  shared ascal-2×-CE risk is now retired). NOTE: that build is **cylinder-only / kv=0**
+  — Robotron's old kv=2 vertical bow is gone (flat rows; the reclaim can't do V-bow).
+  (3) confirm the fitter RAM win. (4) then the real roadmap: **v4 Main_MiSTer userland**
+  (OSD control), distribution. Gate to re-run after any engine change: `sim/tb_warp_stage0.vhd`
   `-gDUT_N_LINES=2 -gOUT_SCALE=2 -gCE_DIV=2 -gW_ACT_G=480 -gH_ACT_G=360` + `sim/tb_hires_check.py`.
 
 ---
