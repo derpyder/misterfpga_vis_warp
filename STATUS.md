@@ -109,6 +109,19 @@ buffer to a 2-line ping-pong, freeing ~180 M9K. Build order
 (vertical bow needs lookahead again); 2× throughput at clk_video; the sim must
 model the 2× output path end-to-end at 296 width. See `SPEC-hires-warp` §3.
 
+**▸ Sequencing decision (2026-05-30): RECLAIM-FIRST.** Reading the engine showed
+"emit at 2× width" means **regenerating the output raster**, which lives in the
+self-tuning sync FIFO (`vis_warp_v2_wp.vhd` — output sync = delayed input sync) —
+the v3.3-postmortem fragile zone. The cylindrical Stage-2 reclaim *removes* that
+FIFO (`src_y=out_y` ⇒ v3.2 passthrough), so doing the **reclaim first** and adding
+2× width on the simple passthrough is lower-risk than threading width through the
+FIFO. Revised order: **Stage-0 sim → Stage-2 reclaim → hi-res width.**
+
+- **Stage 0 — DONE (GHDL GATE PASS).** `sim/tb_warp_stage0.vhd` + `tb_stage0_check.py`
+  drive the real engine with a synthetic grid raster and confirm `src_y==out_y` at
+  kv=0 (horizontal lines on exact rows), straight verticals, symmetric warp. The
+  reclaim's validation rig is ready — re-run it as the reclaim lands.
+
 ## Parked (still useful, not the path forward)
 
 - **crt-royale mapping** ([`sim/gen_lut.py`](./sim/gen_lut.py),

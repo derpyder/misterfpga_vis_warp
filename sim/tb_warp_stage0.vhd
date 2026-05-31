@@ -1,0 +1,204 @@
+-- tb_warp_stage0 -- Stage-0 de-risk testbench for vis_warp_v2_wp
+-- (SPEC-cylindrical-warp.md §5 Stage 0; the reclaim's validation rig.)
+--
+-- Drives the engine with a synthetic raster (small frame, 1px grid pattern),
+-- captures the LAST complete output frame (latency-agnostic: works whether the
+-- output is delayed 64 lines by the sync FIFO, as today, or ~17 cycles after the
+-- reclaim), and dumps it to sim/warp_out/tb_stage0_frame.txt for golden-compare
+-- in Python. The pattern is STATIC across frames, so the FIFO delay doesn't
+-- matter -- any complete output frame reflects the input.
+--
+-- Checks (in the Python comparator, tb_stage0_check.py):
+--   * kv=0  => src_y == out_y  : a horizontal grid line stays on its row.
+--   * warp active              : vertical grid lines bow (column varies by row).
+--
+-- Run (from sim/):
+--   GH=/c/Users/mattl/bin/ghdl/bin/ghdl.exe ; S=../sys
+--   "$GH" -a --std=08 --workdir=ghdl_work \
+--     "$S/vis_warp_pkg_v2.vhd" "$S/vis_warp_luts_pkg.vhd" "$S/vis_warp_rescal.vhd" \
+--     "$S/vis_warp_v2_wp.vhd" tb_warp_stage0.vhd
+--   "$GH" -e --std=08 --workdir=ghdl_work tb_warp_stage0
+--   "$GH" -r --std=08 --workdir=ghdl_work tb_warp_stage0 --stop-time=20ms
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use std.textio.all;
+
+entity tb_warp_stage0 is
+end entity;
+
+architecture sim of tb_warp_stage0 is
+
+    -- ---- raster geometry (small, for fast sim; htotal >= LINE_LEN_MIN=64) ----
+    constant W_ACT   : integer := 64;            -- 4:3-ish so the warp is symmetric
+    constant W_BLK   : integer := 24;            -- htotal = 88 clks (ce_pix every clk, >= LINE_LEN_MIN=64)
+    constant H_ACT   : integer := 48;
+    constant H_BLK   : integer := 8;             -- vtotal = 56 lines
+    constant W_TOTAL : integer := W_ACT + W_BLK; -- 88
+    constant V_TOTAL : integer := H_ACT + H_BLK; -- 56
+    constant HS_START: integer := W_ACT + 6;
+    constant HS_END  : integer := W_ACT + 14;
+    constant VS_START: integer := H_ACT + 2;
+    constant VS_END  : integer := H_ACT + 4;
+    constant GRID    : integer := 8;             -- 1px grid line every 8 px
+    constant N_FRAMES: integer := 6;             -- enough to clear the ~64-line FIFO fill
+
+    signal clk      : std_logic := '0';
+    signal reset    : std_logic := '1';
+    signal done     : boolean   := false;
+
+    signal warp_en     : std_logic := '1';
+    signal curvature_k : unsigned(2 downto 0) := "010"; -- k=2
+    signal curvature_v : unsigned(2 downto 0) := "000"; -- kv=0 -> cylinder, src_y=out_y
+    signal bilinear_en : std_logic := '1';
+    signal sharpness   : unsigned(2 downto 0) := "100"; -- sharp-bilinear K=4
+    signal ce_pix      : std_logic := '1';              -- 1 pixel per clk (CE_DIV=1)
+
+    signal r_in, g_in, b_in : std_logic_vector(7 downto 0) := (others => '0');
+    signal hs_in, vs_in, de_in : std_logic := '0';
+    signal r_out, g_out, b_out : std_logic_vector(7 downto 0);
+    signal hs_out, vs_out, de_out : std_logic;
+
+    -- ---- captured frames ----
+    type row_t   is array (0 to W_ACT-1) of integer range 0 to 255;
+    type frame_t is array (0 to H_ACT-1) of row_t;
+    signal cur_frame  : frame_t := (others => (others => 0));
+    signal last_frame : frame_t := (others => (others => 0));
+    signal frames_seen : integer := 0;
+
+begin
+
+    -- clock
+    clk_proc : process
+    begin
+        while not done loop
+            clk <= '0'; wait for 5 ns;
+            clk <= '1'; wait for 5 ns;
+        end loop;
+        wait;
+    end process;
+
+    reset <= '1', '0' after 105 ns;
+
+    -- DUT: the engine, default generics (MAX_SRC_W=512, N_LINES=128)
+    dut : entity work.vis_warp_v2_wp
+        port map (
+            clk         => clk,
+            reset       => reset,
+            warp_en     => warp_en,
+            curvature_k => curvature_k,
+            bilinear_en => bilinear_en,
+            sharpness   => sharpness,
+            curvature_v => curvature_v,
+            ce_pix      => ce_pix,
+            r_in => r_in, g_in => g_in, b_in => b_in,
+            hs_in => hs_in, vs_in => vs_in, de_in => de_in,
+            r_out => r_out, g_out => g_out, b_out => b_out,
+            hs_out => hs_out, vs_out => vs_out, de_out => de_out
+        );
+
+    -- ---- input raster generator (ce_pix='1' every clk) ----
+    input_gen : process(clk)
+        variable ix : integer range 0 to W_TOTAL-1 := 0;
+        variable iy : integer range 0 to V_TOTAL-1 := 0;
+        variable fr : integer := 0;
+        variable lit : boolean;
+    begin
+        if rising_edge(clk) then
+            if reset = '1' then
+                ix := 0; iy := 0; fr := 0;
+                hs_in <= '0'; vs_in <= '0'; de_in <= '0';
+                r_in <= x"00"; g_in <= x"00"; b_in <= x"00";
+            else
+                -- sync for current (ix,iy)
+                if ix >= HS_START and ix < HS_END then hs_in <= '1'; else hs_in <= '0'; end if;
+                if iy >= VS_START and iy < VS_END then vs_in <= '1'; else vs_in <= '0'; end if;
+                if ix < W_ACT and iy < H_ACT then
+                    de_in <= '1';
+                    lit := (ix mod GRID = 0) or (iy mod GRID = 0);
+                    if lit then
+                        r_in <= x"FF"; g_in <= x"FF"; b_in <= x"FF";
+                    else
+                        r_in <= x"00"; g_in <= x"00"; b_in <= x"00";
+                    end if;
+                else
+                    de_in <= '0';
+                    r_in <= x"00"; g_in <= x"00"; b_in <= x"00";
+                end if;
+                -- advance one pixel
+                if ix = W_TOTAL-1 then
+                    ix := 0;
+                    if iy = V_TOTAL-1 then
+                        iy := 0; fr := fr + 1;
+                        if fr >= N_FRAMES then done <= true; end if;
+                    else
+                        iy := iy + 1;
+                    end if;
+                else
+                    ix := ix + 1;
+                end if;
+            end if;
+        end if;
+    end process;
+
+    -- ---- output capture: build cur_frame, snapshot to last_frame each vs rising ----
+    out_cap : process(clk)
+        variable ox   : integer range 0 to W_TOTAL := 0;
+        variable oy   : integer range 0 to V_TOTAL := 0;
+        variable de_d : std_logic := '0';
+        variable vs_d : std_logic := '0';
+    begin
+        if rising_edge(clk) then
+            if reset = '1' then
+                ox := 0; oy := 0; de_d := '0'; vs_d := '0';
+            else
+                if vs_out = '1' and vs_d = '0' then
+                    -- frame boundary: the frame we just filled is complete
+                    last_frame  <= cur_frame;
+                    frames_seen <= frames_seen + 1;
+                    cur_frame   <= (others => (others => 0));
+                    ox := 0; oy := 0;
+                elsif de_out = '0' and de_d = '1' then
+                    -- end of an active line
+                    if oy < V_TOTAL then oy := oy + 1; end if;
+                    ox := 0;
+                elsif de_out = '1' then
+                    if oy < H_ACT and ox < W_ACT then
+                        cur_frame(oy)(ox) <= to_integer(unsigned(r_out));
+                    end if;
+                    ox := ox + 1;
+                end if;
+                de_d := de_out;
+                vs_d := vs_out;
+            end if;
+        end if;
+    end process;
+
+    -- ---- dump the last complete frame + a quick stat summary ----
+    dump_proc : process
+        file     f      : text;
+        variable l      : line;
+        variable st     : file_open_status;
+        variable nbright: integer := 0;
+    begin
+        wait until done;
+        wait for 1 ns;
+        file_open(st, f, "warp_out/tb_stage0_frame.txt", write_mode);
+        for yy in 0 to H_ACT-1 loop
+            for xx in 0 to W_ACT-1 loop
+                write(l, last_frame(yy)(xx));
+                write(l, ' ');
+                if last_frame(yy)(xx) > 96 then nbright := nbright + 1; end if;
+            end loop;
+            writeline(f, l);
+        end loop;
+        file_close(f);
+        report "TB stage0: frames_seen=" & integer'image(frames_seen)
+             & "  out_dims=" & integer'image(W_ACT) & "x" & integer'image(H_ACT)
+             & "  bright_px=" & integer'image(nbright)
+             & "  (file: warp_out/tb_stage0_frame.txt)" severity note;
+        wait;
+    end process;
+
+end architecture;

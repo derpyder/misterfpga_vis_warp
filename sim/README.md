@@ -24,6 +24,7 @@ anything about the doubling artifact or the hi-res fix, this is the judge — do
 | `gen_lut.py` | Regenerate `WARP_LUT` + calibrate `K_LUT` to a crt-royale-familiar range. |
 | `warp_royale_map.py` | Map our `k`/`kv` dials onto crt-royale geom params (look / preset labels). |
 | `tb_rescal.vhd` | GHDL testbench for `sys/vis_warp_rescal.vhd` (res-adaptive weights; "ALL GOLDENS PASS"). |
+| `tb_warp_stage0.vhd` + `tb_stage0_check.py` | **Stage-0 engine rig** (SPEC-cylindrical §5): drives `vis_warp_v2_wp` with a synthetic grid raster, captures the output frame, and asserts `src_y==out_y` (kv=0) + straight verticals + symmetric warp. The reclaim's validation gate. GHDL: GATE PASS. |
 
 `gen_lut.py` and `warp_royale_map.py` are **parked** — useful for the look and
 preset labels once hi-res makes the look clean; they do **not** fix doubling
@@ -40,6 +41,12 @@ GH=/c/Users/mattl/bin/ghdl/bin/ghdl.exe ; WD=ghdl_work ; S=../sys
   "$S/vis_warp_pkg_v2.vhd" "$S/vis_warp_luts_pkg.vhd" "$S/vis_warp_rescal.vhd" \
   "$S/vis_warp_v2_wp.vhd" "$S/vis_warp.vhd"
 "$GH" -e --std=08 --workdir="$WD" vis_warp
+
+# Stage-0 engine TB (run from sim/ so the frame dump path resolves):
+"$GH" -a --std=08 --workdir="$WD" tb_warp_stage0.vhd
+"$GH" -e --std=08 --workdir="$WD" tb_warp_stage0
+"$GH" -r --std=08 --workdir="$WD" tb_warp_stage0 --stop-time=10ms
+python tb_stage0_check.py     # -> STAGE-0 GATE: PASS
 ```
 
 ## Archived models
