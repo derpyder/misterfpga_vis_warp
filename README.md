@@ -14,12 +14,13 @@ scales naturally with whatever HDMI mode you run.
 > result. See [`LIMITATIONS.md`](./LIMITATIONS.md) for the honest tradeoff.
 
 ```
-status:  alpha (v3.3d — symmetry + sharp-bilinear validated; first consumer core shipped)
+status:  alpha — barrel + cylindrical warp run on hardware; 1px line-doubling
+         is the open blocker (see below), so no build is a polished release yet
 target:  Terasic DE10-nano (Cyclone V 5CSEBA6)
 quartus: 17.0.2 Lite (free edition)
 ```
 
-## On hardware — Robotron (first validated consumer core)
+## On hardware — Robotron (first consumer core)
 
 | Barrel warp | Warp + CRT shadowmask |
 |---|---|
@@ -29,11 +30,18 @@ Symmetric barrel across the native 4:3 frame (self-tuning sync-delay), with
 the CRT shadowmask stacked downstream so the mask border curves *with* the
 tube. DE10-nano over HDMI.
 
-**▶ Try it now (no Quartus):** pre-built core + drop-in MRAs for **6
+> **⚠️ Preview, not a polished release.** This baked-warp build has the known
+> **line-doubling** issue — 1-pixel content (text, thin lines) splits into two
+> rows in the magnified center. It's a proven resample limit, not a bug, fixed by
+> the in-progress [hi-res warp](./SPEC-hires-warp-2026-05-30.md) (see
+> [`LIMITATIONS.md`](./LIMITATIONS.md)). Smooth content looks right; 1px pixel-art
+> does not. Try it to see the effect; run warp-off if the doubling bothers you.
+
+**▶ Try the preview (no Quartus):** pre-built core + drop-in MRAs for **6
 Williams games** (Robotron, Joust, Stargate, Bubbles, Splat, Alien Arena)
-— [**download the Robotron-VIS release**](https://github.com/derpyder/Arcade-Robotron_MiSTer-VIS/releases/latest).
+— [**Robotron-VIS release**](https://github.com/derpyder/Arcade-Robotron_MiSTer-VIS/releases/latest).
 Copy the `.rbf` to `_Arcade/cores/`, the `(vis_warp).mra` files to
-`_Arcade/`, bring your own MAME ROMs. Pre-named to just work, no renaming.
+`_Arcade/`, bring your own MAME ROMs.
 
 Full consumer core + install guide:
 [`Arcade-Robotron_MiSTer-VIS`](https://github.com/derpyder/Arcade-Robotron_MiSTer-VIS).
@@ -115,9 +123,10 @@ This fork:
 4. Tracks upstream Template_MiSTer so it stays mergeable for an
    eventual PR.
 
-Downstream cores (`Arcade-Galaga_MiSTer-VIS`, others coming) consume
+Downstream cores (`Arcade-Robotron_MiSTer-VIS`, others coming) consume
 this framework via the same `sys/` vendoring pattern, with `MISTER_WARP=1`
-defined in their per-core `.qsf`.
+defined in their per-core `.qsf`. (Rotated / `MISTER_FB` cores like Galaga
+can't use SITE C as-is — see [`LIMITATIONS.md`](./LIMITATIONS.md) §3.)
 
 ---
 
@@ -134,13 +143,14 @@ emu (game core)
 ```
 
 vis_warp operates on **source-resolution pixels** in the **`clk_video`
-clock domain**, before ascal. It uses **2-buffer M9K ping-pong** at
-source resolution (~30% of M9K total at typical arcade res) — the whole
-source frame is buffered, so the warp can pull from any source coordinate
-(no edge-clamping artifacts). **Bilinear interpolation** reads 4
-neighboring source pixels per output pixel via a 4-way bank split (same
-total memory as single-buffer, 4 simultaneous read ports) and blends
-them, producing smooth curves.
+clock domain**, before ascal. The **spherical** engine buffers a **128-line
+sliding window** in M9K (~185 blocks) to give the vertical warp bidirectional
+lookahead, and reads 4 neighboring source pixels per output pixel (a 4-way bank
+split) for **bilinear** smooth curves. The newer **cylindrical** engine holds
+`src_y=out_y`, which lets it collapse that buffer to a **2-line ping-pong**
+(~180 M9K reclaimed) and run at **any source width** — the structural basis for
+the hi-res line-doubling fix. See [`STATUS.md`](./STATUS.md) for the two-engine
+picture.
 
 Architectural decisions are locked in
 [`SPEC-vis_warp-v3.md`](./SPEC-vis_warp-v3.md). The short version is in
@@ -149,22 +159,23 @@ the project memory at
 
 ---
 
-## Status (2026-05-28)
+## Status (2026-05-30) — single source of truth: [`STATUS.md`](./STATUS.md)
 
 | Layer | Status |
 |---|---|
-| RTL module + framework integration | ✅ v3.1 |
-| Test rig (Template + selectable test patterns) | ✅ Validated on hardware (k=0 / k=2 / k=7) |
-| Bilinear interpolation | ✅ Implemented; awaiting first hardware validation |
-| Consumer core: Galaga | ⚠️ Fork ready; build pending bilinear validation |
-| Other consumer cores (Pac-Man, DK, etc.) | 📋 Planned |
+| RTL + framework integration (SITE C, macro gate) | ✅ HW-validated |
+| Spherical engine (barrel) on Template + Robotron | ✅ HW-validated (k=0/2/7) |
+| Sharp-bilinear + self-tuning sync-delay | ✅ HW-validated |
+| Cylindrical engine (Block A) + res-adaptive calibration | ✅ HW-validated on Template |
+| **1px line-doubling** | ⚠️ **Open blocker** — fix specced + sim-proven, not built |
+| Consumer core: Robotron (Williams ×6) | ⚠️ Preview shipped; has the line-doubling issue |
 | Main_MiSTer userland (OSD config + presets) | 📋 v4 roadmap |
-| Upstream PR to MiSTer-devel | 📋 Post-v4 |
-| GitHub Actions auto-build | 📋 Future |
+| Upstream PR / CI auto-build | 📋 Future |
 
-See [`LIMITATIONS.md`](./LIMITATIONS.md) for what doesn't work yet,
-[`ROADMAP.md`](./ROADMAP.md) for the path to broader community adoption,
-and [`CHANGELOG.md`](./CHANGELOG.md) for the release history.
+See [`STATUS.md`](./STATUS.md) for where things stand and what's next,
+[`LIMITATIONS.md`](./LIMITATIONS.md) for what doesn't work yet,
+[`ROADMAP.md`](./ROADMAP.md) for the path to broader adoption, and
+[`CHANGELOG.md`](./CHANGELOG.md) for release history.
 
 ---
 
@@ -174,8 +185,9 @@ and [`CHANGELOG.md`](./CHANGELOG.md) for the release history.
 You want a pre-compiled `.rbf` for the specific game core you want to
 play with vis_warp. Those live in companion repos:
 
-- **`Arcade-Galaga_MiSTer-VIS`** — Galaga with vis_warp (release pending
-  bilinear validation)
+- **`Arcade-Robotron_MiSTer-VIS`** — Robotron + 5 more Williams games
+  (preview release; has the known line-doubling issue, see
+  [`LIMITATIONS.md`](./LIMITATIONS.md))
 - (more cores coming — see [`ROADMAP.md`](./ROADMAP.md))
 
 Drop the `.rbf` in `/media/fat/_Arcade/cores/`, drop the matching MRA
@@ -195,7 +207,7 @@ If you want to compile your own vis_warp-enabled core:
 
 1. **Clone this fork** for the framework files.
 2. **Clone your target core's repo** (e.g.,
-   `MiSTer-devel/Arcade-Galaga_MiSTer`). Open it in Quartus 17.0.2 Lite.
+   `MiSTer-devel/Arcade-Pacman_MiSTer`). Open it in Quartus 17.0.2 Lite.
 3. **Vendor `sys/`** from this fork over the core's `sys/` (this matches
    MiSTer's standard "Update sys" pattern). See
    [`ROADMAP.md`](./ROADMAP.md#framework-version-compatibility) for
@@ -211,7 +223,7 @@ If you want to compile your own vis_warp-enabled core:
 
 The Template_MiSTer-VIS dev rig (this repo, with `mycore.v` and
 selectable test patterns) is the right place to iterate on vis_warp
-itself. Galaga and other consumer cores are validation hosts, not dev
+itself. Robotron and other consumer cores are validation hosts, not dev
 hosts.
 
 Help wanted on: building more consumer cores, validating on different
@@ -224,22 +236,31 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
 ```
 Template_MiSTer-VIS/
+├── STATUS.md                        ← single source of truth (read first)
 ├── README.md                        ← you are here
 ├── README-upstream-template.md      ← preserved upstream Readme
 ├── LIMITATIONS.md                   ← what doesn't work yet
-├── ROADMAP.md                       ← path to community adoption
-├── CONTRIBUTING.md                  ← how to help
-├── CHANGELOG.md                     ← release history
-├── SPEC-vis_warp-v3.md              ← active work spec
-├── HANDOFF-vis_warp-v3-kickoff-*.md ← session continuity (transient)
+├── ROADMAP.md  CONTRIBUTING.md  CHANGELOG.md  ADOPTING-A-CORE.md  EFFECTS-BACKLOG.md
+├── SPEC-hires-warp-2026-05-30.md    ← ACTIVE: the line-doubling fix
+├── SPEC-cylindrical-warp.md         ← current engine direction (+ the reclaim)
+├── SPEC-vis_warp-v3.md              ← foundational architecture reference
+├── RESEARCH-warp-quality-*.md       ← curved-warp quality decision record
+├── POSTMORTEM-v3.3-sync-delay-*.md  ← why the sync delay was hard
+├── docs/
+│   ├── screenshots/                 ← README images
+│   └── archive/                     ← superseded session handoffs
 ├── sys/                             ← framework (upstream + vis_warp additions)
 │   ├── vis_warp.vhd                 ← wrapper (CDC, HPS_BUS, NN/bilinear mux)
 │   ├── vis_warp_v2_wp.vhd           ← engine (M9K + warp math + bilinear)
+│   ├── vis_warp_rescal.vhd          ← res-adaptive weight divider
 │   ├── vis_warp_pkg_v2.vhd          ← types
 │   ├── vis_warp_luts_pkg.vhd        ← coefficient LUTs
 │   ├── vis_warp_wrapper_tb.vhd      ← GHDL testbench
 │   ├── B4_TODO.md                   ← deferred CDC notes
 │   └── …                            ← upstream framework files
+├── sim/                             ← Python models + GHDL TB (see sim/README.md)
+│   ├── warp_bitexact.py             ← THE authoritative model
+│   └── archive/                     ← superseded diagnosis models
 ├── rtl/                             ← demo core
 │   └── mycore.v                     ← 8 selectable patterns (grid, vbars, …)
 ├── Template.sv                      ← emu wrapper with CONF_STR pattern selector

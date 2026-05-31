@@ -1,5 +1,45 @@
 # Changelog
 
+## Unreleased — cylindrical engine + the line-doubling fix (2026-05-29 → 30)
+
+Active work on branch `feature/cylindrical-warp-blockA`. **Not a cut release** —
+`main` still carries the radial v3.3d engine, and the baked-warp Robotron build
+is **not shippable as-is** (see line-doubling below). Authoritative current
+state: [`STATUS.md`](./STATUS.md).
+
+- **Cylindrical warp engine (Block A).** A separable **x²-only** X warp — straight
+  verticals, flat rows (Trinitron/PVM look) — with a `curvature_v` (kv) runtime
+  V-bow dial. `kv=0 ⇒ src_y=out_y` exactly, the precondition for both the Stage-2
+  buffer reclaim and any-source-width operation. "Good enough" on the Template
+  grid. Sibling to the spherical engine via a compile-time `MISTER_WARP_CYL`
+  macro; the spherical build stays byte-identical. Spec:
+  [`SPEC-cylindrical-warp.md`](./SPEC-cylindrical-warp.md).
+- **Res-adaptive calibration** (`sys/vis_warp_rescal.vhd`). The aspect weights
+  AX2/AY2 are now computed per-frame from the detected source dimensions by a
+  frame-rare divider, instead of being hardcoded for 480×360. GHDL goldens pass
+  (288×224 / 480×360 / 640×480 / 320×240); Quartus clean (RAM 284/553, zero added,
+  setup +0.486 ns); **HW-validated on Template** via a 320×240 ↔ 480×360 OSD
+  toggle (cylinder stays identically curved + edge-to-edge). The fill constant
+  stays fixed (edge_M is aspect-constant ~1.19).
+- **Minification prefilter — validated UNNECESSARY** (sim + eyeball). At source
+  resolution the minification (`J_max < 2` src-px/out-px) is too gentle to alias
+  visibly; bilinear ≈ box ≈ supersample. The gated running-box stays the option of
+  record only if `J≫1` ever happens.
+  [`RESEARCH-warp-quality-2026-05-29.md`](./RESEARCH-warp-quality-2026-05-29.md).
+- **Line-doubling root-caused — the headline.** Robotron's baked warp **doubles
+  1-pixel content on hardware** (single rows → two). A new bit-exact model
+  ([`sim/warp_bitexact.py`](./sim/warp_bitexact.py)) reproduces it: center
+  magnification (overscan fill) + sharp-bilinear point-sampling of 1px features is
+  a **Nyquist wall**, not a tuning bug. The float models missed it.
+- **Hi-res internal warp specced — the fix.** Warp *and output* at 2× width, with
+  ascal doing the final downscale (crt-royale's method) → sim-proven 30/30 source
+  lines stay one solid run. Affordable **only because** the cylindrical Stage-2
+  reclaim frees the M9K, so the two are now one coupled effort. Not built. Spec:
+  [`SPEC-hires-warp-2026-05-30.md`](./SPEC-hires-warp-2026-05-30.md).
+- **Docs reorganized.** [`STATUS.md`](./STATUS.md) is now the single source of
+  truth; rolling `HANDOFF-*.md` docs moved to `docs/archive/`; the `sim/` model
+  zoo triaged with the authoritative model called out (`sim/README.md`).
+
 ## v3.3d — Sharp-bilinear + runtime sharpness control + honest docs (2026-05-28)
 
 Answers a community call-out ("fuzzy pixels" / README overclaimed

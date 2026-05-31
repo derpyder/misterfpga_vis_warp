@@ -1,10 +1,36 @@
 # Limitations
 
 What vis_warp doesn't do yet, what it does poorly, and what the known
-edge cases are. Last updated 2026-05-28.
+edge cases are. Last updated 2026-05-30.
 
 This is the honest list. Read it before evaluating or recommending the
-project.
+project. Current state lives in [`STATUS.md`](./STATUS.md).
+
+---
+
+## ⚠️ The current #1 issue — line-doubling of 1-pixel content
+
+A source-resolution sharp warp renders **single-pixel features (grid lines,
+text) as two thin rows with a gap** in the magnified center band. It's on
+hardware today (Robotron, baked k=2). It's a **Nyquist wall, proven bit-exact**
+([`sim/warp_bitexact.py`](./sim/warp_bitexact.py)), not a tuning bug:
+
+- A full-screen barrel warp must magnify the center (~16% at k=2) so the bowed
+  edges don't pull black into the corners (the overscan fill). 1 source px → ~1.16
+  output px.
+- Sharp-bilinear (near-nearest-neighbor) point-sampling of that **non-integer
+  magnification** lands a 1px feature in one output column for some lines and two
+  for others → the doubling. Smooth / ≥2px content survives — which is why
+  gradients look fine and the grid torture pattern exposes it.
+
+**Consequence:** no current build is a polished release. The baked-warp Robotron
+build is a preview — run warp-off, or wait for the fix.
+
+**The fix is specced and sim-proven (not built):** warp *and output* at 2×
+internal resolution, with ascal doing the downscale →
+[`SPEC-hires-warp-2026-05-30.md`](./SPEC-hires-warp-2026-05-30.md). Ruled-out
+approaches (softer LUT, no-overscan, prescale-then-decimate) are listed there so
+nobody retries them.
 
 ---
 
@@ -55,16 +81,25 @@ read side pulls stale data from those addresses.
 **Common arcade cores (≤512 wide) are unaffected**: Galaga (288),
 Pac-Man (224), Donkey Kong (256), Defender (320), etc.
 
-### 3. MISTER_FB cores not validated
+**The cylindrical engine removes this cap entirely** — its 2-line buffer floor is
+independent of height, so it runs at any source width on-chip
+([`SPEC-cylindrical-warp.md`](./SPEC-cylindrical-warp.md) §3). The hi-res
+line-doubling fix bumps `MAX_SRC_W` to 1024 on the spherical path anyway.
 
-Cores that use the direct-framebuffer path (e.g., Apple IIGS, some
-computer cores) draw video into DDR3 from the HPS side. vis_warp's
-SITE C insertion point assumes the core emits via the standard `emu`
-RGB output path. MISTER_FB cores may bypass this entirely, in which
-case vis_warp has nothing to intercept.
+### 3. MISTER_FB / rotated-DDR cores not compatible at SITE C
 
-**Status**: not investigated. May work, may need additional plumbing,
-may be incompatible. Real arcade cores are unaffected.
+Cores that route video through a DDR3 framebuffer — direct-framebuffer cores
+(Apple IIGS, some computer cores) **and rotated/TATE arcade cores that use
+`screen_rotate` (`MISTER_FB=1`, e.g. Galaga)** — don't emit through the live
+`emu` RGB path that vis_warp's SITE C insertion taps. ASCAL reads those pixels
+from DDR and **ignores `i_r/i_g/i_b`**, so vis_warp's output lands on a dead
+port. This is exactly the Galaga "vanilla output" mystery: the RTL was never
+broken; the warped pixels simply weren't being read. Full write-up:
+[`docs/archive/HANDOFF-galaga-signaltap-next-session-2026-05-28.md`](./docs/archive/HANDOFF-galaga-signaltap-next-session-2026-05-28.md).
+
+**Status**: incompatible at SITE C as-is. A post-DDR or in-DDR insertion point
+would be a separate investigation. Non-rotated arcade cores on the standard RGB
+output path are unaffected.
 
 ### 4. No Main_MiSTer userland (yet)
 
@@ -242,15 +277,14 @@ To prevent over-cautious skipping based on the list above:
 
 ## When in doubt
 
-This is alpha software with one validated test rig and one (pending)
-validated consumer core. **It will have bugs.** File issues with
-specific repro steps. Don't recommend it to anyone whose MiSTer
+This is alpha software. **It will have bugs**, and the **line-doubling of 1px
+content (top of this file) means no build is a polished release yet.** File
+issues with specific repro steps. Don't recommend it to anyone whose MiSTer
 experience you care about without warning them.
 
-The architecture is sound (we re-derived it from first principles
-after a multi-hour ghost chase; see
-`~/.claude/projects/D--deck/memory/design_vis_warp_constraints.md`).
-The integration is correct (validated end-to-end on Template). The
-quality is shipping-grade with bilinear. But the breadth (one core
-right now, more coming) and polish (no userland, no upstream) are
-where the gaps are.
+The architecture is sound (re-derived from first principles after a multi-hour
+ghost chase; see `~/.claude/projects/D--deck/memory/design_vis_warp_constraints.md`).
+The integration is correct (validated end-to-end on Template and Robotron). Smooth
+content looks good with bilinear; **1px pixel-art does not yet** — the hi-res warp
+is the remedy. Breadth (one consumer core), polish (no userland, no upstream), and
+that quality gap are where the work is.

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# ⚠️ ARCHIVED / DO NOT TRUST FOR THE DOUBLING ARTIFACT. This is a FLOAT model; it
+# did NOT reproduce the hardware line-doubling. The authoritative model is the
+# bit-exact ../warp_bitexact.py (see ../README.md and SPEC-hires-warp-2026-05-30.md).
 """Reproduce the HARDWARE line-doubling/splitting artifact (the magenta-boxed
 double lines on the grid) and test whether the softer LUT + sharpness fix it.
 

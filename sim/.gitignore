@@ -2,3 +2,6 @@
 warp_out/
 # GHDL analyze/elaborate work dir
 ghdl_work/
+# Python bytecode cache
+__pycache__/
+*.pyc

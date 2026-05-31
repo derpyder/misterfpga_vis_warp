@@ -1,3 +1,11 @@
+> **📦 ARCHIVED — superseded session handoff.** "Ready for first Quartus build"
+> — long since built, validated, and shipped (many commits past). Kept for
+> history. The locked architecture it kicked off lives in
+> [`SPEC-vis_warp-v3.md`](../../SPEC-vis_warp-v3.md); current project state:
+> [`STATUS.md`](../../STATUS.md).
+
+---
+
 # vis_warp v3 kickoff — RTL complete, ready for first Quartus build
 
 Session 2026-05-28 morning. Following the v1→v2 ghost chase

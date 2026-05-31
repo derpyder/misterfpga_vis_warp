@@ -102,9 +102,9 @@ warning summary) and the **file:line** it points at.
 ## How to propose RTL changes
 
 vis_warp's architecture is locked in
-[`design_vis_warp_constraints.md`](../memory/design_vis_warp_constraints.md)
-(also referenced in the spec) — those decisions were re-derived from
-first principles after a multi-hour ghost chase. Please don't re-litigate:
+[`SPEC-vis_warp-v3.md`](./SPEC-vis_warp-v3.md) (the author also keeps a private
+`~/.claude/.../design_vis_warp_constraints.md`) — those decisions were re-derived
+from first principles after a multi-hour ghost chase. Please don't re-litigate:
 
 - vis_warp lives **pre-ascal** at **source resolution** on
   **clk_video**.
@@ -127,6 +127,60 @@ first principles after a multi-hour ghost chase. Please don't re-litigate:
 Open a discussion or issue first if you're proposing significant
 changes — it's a small project, easy to align before someone spends a
 weekend on something we won't merge.
+
+---
+
+## Developing vis_warp itself — the sim-first dev loop
+
+Hard-won discipline, backed by two postmortems (the v3.3 sync-delay fight and
+the line-doubling discovery): **model and validate in sim BEFORE touching RTL.**
+Don't pile unvalidated changes onto the engine. See
+[`STATUS.md`](./STATUS.md) for where things stand and what's next.
+
+**Roles.** The *user* runs Quartus full compiles and flashes hardware — that's
+where build, timing, and runtime truth live. Contributors run **GHDL + Python
+sim only**. Hardware screenshots come back as `output_files/NNNN.jpg`.
+
+**Python models** (`sim/`) — run with an **absolute path** (the shell cwd resets
+between calls):
+
+```
+python D:/deck/fpga/Template_MiSTer-VIS/sim/warp_bitexact.py
+```
+
+- `warp_bitexact.py` — **the authoritative model.** Bit-faithful to the Q15
+  datapath; it *reproduces the hardware line-doubling*. The float models do
+  **not** — do not trust them for that artifact. This is the judge.
+- `warp_model.py` — geometry + look-family golden reference (proves `kv=0 ⇒
+  src_y==out_y` exactly).
+- `gen_lut.py`, `warp_royale_map.py` — LUT regeneration + crt-royale dial
+  mapping (parked; useful for look/preset labels).
+- Superseded diagnosis models live in `sim/archive/` — see
+  [`sim/README.md`](./sim/README.md).
+
+**GHDL 6.0.0** (`/c/Users/mattl/bin/ghdl/bin/ghdl.exe`). Analyze + elaborate the
+engine — both clean at HEAD (note `vis_warp_rescal.vhd` analyzes **before**
+`vis_warp_v2_wp.vhd`, which instantiates it):
+
+```
+GH=/c/Users/mattl/bin/ghdl/bin/ghdl.exe
+WD=sim/ghdl_work ; S=sys
+"$GH" -a --std=08 --workdir="$WD" \
+  "$S/vis_warp_pkg_v2.vhd" "$S/vis_warp_luts_pkg.vhd" "$S/vis_warp_rescal.vhd" \
+  "$S/vis_warp_v2_wp.vhd" "$S/vis_warp.vhd"
+"$GH" -e --std=08 --workdir="$WD" vis_warp
+```
+
+**Engine math facts** (so you don't re-derive them):
+
+- `WARP_LUT`: `M = 1 + 0.3·idx/256`; K-scale `M_eff = 1 + (M-1)·K/2` (K=2 ⇒
+  `M_eff = M`). LUT indexed by `(AX2·dx² + AY2·dy²) >> 16`, saturates at idx 255.
+- `M_scaled` is Q15: **32768 = identity** (`src = out`). Forcing the Y multiplier
+  to 32768 gives `src_y = out_y` — the cylinder precondition.
+- The aspect weights `AX2`/`AY2` are now **res-adaptive** (computed per-frame by
+  `sys/vis_warp_rescal.vhd`), not the old hardcoded `LUT_AX2_Q24`/`LUT_AY2_Q24`
+  constants. The fill constant (27458) stays fixed — `edge_M` is aspect-constant
+  (~1.19 for 4:3).
 
 ---
 

@@ -1,56 +1,63 @@
 # Roadmap
 
 The path from "works on my machine" to "the MiSTer community can
-actually use this." Last updated 2026-05-28.
+actually use this." Last updated 2026-05-30. Current state of record:
+[`STATUS.md`](./STATUS.md).
 
 This roadmap describes both the **technical work** still to do and the
 **distribution strategy** for getting vis_warp into people's hands.
 
 ---
 
-## Current state (v3.1)
+## Current state (2026-05-30)
 
-- ✅ RTL implemented, validated end-to-end on Template_MiSTer-VIS rig
-- ✅ Bilinear interpolation in place for shipping-grade visuals
-- ✅ Galaga consumer fork ready (build pending bilinear hardware validation)
-- ❌ No Main_MiSTer userland (no OSD config, no preset INI)
-- ❌ Not upstream
-- ❌ No automated build pipeline
-- ❌ Only one validated consumer core
+- ✅ Spherical engine validated end-to-end on the Template rig and on Robotron
+  hardware (barrel at k=0/2/7); sharp-bilinear, self-tuning sync-delay, runtime
+  sharpness register.
+- ✅ **Cylindrical engine (Block A)** "good enough" on Template; **res-adaptive
+  calibration HW-validated** (any resolution, edge-to-edge).
+- ⚠️ **Line-doubling of 1px content is the open quality blocker** — a Nyquist
+  wall, proven bit-exact. No build is a polished release yet; the baked Robotron
+  warp is a preview, not shippable as-is. Fix specced + sim-proven (hi-res
+  internal warp, coupled with the Stage-2 reclaim), **not built**.
+- ❌ No Main_MiSTer userland (no OSD config, no preset INI).
+- ❌ Not upstream; no automated build pipeline.
 
-This is enough to **demo**, not enough to **distribute broadly**.
+Enough to **demo the effect**, not yet enough to **ship a polished release**
+(line-doubling) or **distribute broadly** (no userland).
 
 ---
 
-## v3.4: Sync delay — proper implementation needed
+## Near-term technical priority: the line-doubling fix (hi-res warp + Stage-2 reclaim)
 
-**Status**: blocked. Two attempts (v3.3 counter FSM and v3.3b FIFO)
-both failed empirically on hardware. See
+**This precedes the userland/distribution items below.** The center magnification
+needed for overscan fill, plus sharp-bilinear sampling of 1px features, doubles
+rows on hardware — a resample limit, not a tuning bug
+([`SPEC-hires-warp-2026-05-30.md`](./SPEC-hires-warp-2026-05-30.md), proven in
+`sim/warp_bitexact.py`). The fix: warp *and output* at 2× internal width, let
+ascal downscale. It's affordable only because the cylindrical Stage-2 buffer
+reclaim ([`SPEC-cylindrical-warp.md`](./SPEC-cylindrical-warp.md) §3) frees the
+M9K — so the two are **one coupled effort**. Sim-first build order is in
+[`STATUS.md`](./STATUS.md). Until it lands, a release is warp-off-by-default or
+preview-only.
+
+---
+
+## Sync delay — RESOLVED (v3.3c) / moot in cylindrical mode
+
+**Status**: **no longer a roadmap blocker.** The top-of-frame asymmetry this was
+meant to fix was resolved by the **v3.3c self-tuning sync-delay** — the engine
+measures the core's line period and sets the writer-lead automatically, validated
+symmetric top-to-bottom on Template and Robotron hardware (see
+[`LIMITATIONS.md` §0](./LIMITATIONS.md) and [`CHANGELOG.md`](./CHANGELOG.md)). The
+**cylindrical engine** makes the question moot entirely: `src_y=out_y` means the
+output isn't delayed vs the input, so Stage-2 *removes* the sync FIFO back to the
+v3.2 passthrough (a safe deletion, not the v3.3 add-a-delay that failed).
+
+The two earlier failed attempts (v3.3 counter FSM, v3.3b FIFO) are preserved as a
+cautionary tale in
 [`POSTMORTEM-v3.3-sync-delay-2026-05-28.md`](./POSTMORTEM-v3.3-sync-delay-2026-05-28.md)
-for the full debugging history.
-
-**Why this matters**: without sync delay, the top ~20-30% of each frame
-shows asymmetric/stale-buffer content. The bottom is clean. Affects
-HUDs/score areas across most arcade cores. See
-[`LIMITATIONS.md#0-top-of-frame-asymmetric-warp-v32-release`](./LIMITATIONS.md#0-top-of-frame-asymmetric-warp-v32-release).
-
-**Why deferred**: agent-assisted implementations failed; this needs
-careful design with simulation infrastructure and SignalTap probes
-wired BEFORE writing RTL. The complexity is in:
-- Multi-clock-domain ce_pix vs FIFO clk rate alignment
-- ASCAL's input-lock behavior at startup (must see valid sync from t=0)
-- Pipeline pixel-data vs sync-signal alignment through the warp stages
-
-**Pre-requisites before retry**:
-1. GHDL/Modelsim testbench that simulates vis_warp with synthetic
-   timed input and verifies output sync edges
-2. SignalTap probes on first hardware build (input sync, FIFO output,
-   pipeline stages, ASCAL inputs)
-3. Read POSTMORTEM thoroughly — specific guidance for the v3.4 retry
-   in its "Pre-emptive guidance" section
-
-**Estimated effort**: 2–3 days of dedicated work including sim setup,
-not a "spend a few hours and see" task.
+— read it before ever touching sync timing on the spherical engine again.
 
 ## v4: Main_MiSTer userland (highest priority after v3.4)
 
@@ -104,7 +111,7 @@ Once v4 works, submit two coordinated PRs:
    gates).
 2. `MiSTer-devel/Main_MiSTer` — the userland bits.
 
-PR body template (per the [framework reference](../memory/reference_mister_framework.md)):
+PR body template (following the project's framework-integration reference notes):
 
 > Adds vis_warp — a framework-level barrel-distortion video processor.
 > Gated by `MISTER_WARP=1` macro so cores opt in. Tested with the
@@ -286,7 +293,7 @@ Our experience syncing Galaga (snapshot circa 2024-05):
    to avoid smart-recompile cache issues.
 
 This is captured in detail in
-[`HANDOFF-vis_warp-v3-kickoff-2026-05-28.md`](./HANDOFF-vis_warp-v3-kickoff-2026-05-28.md).
+[`HANDOFF-vis_warp-v3-kickoff-2026-05-28.md`](./docs/archive/HANDOFF-vis_warp-v3-kickoff-2026-05-28.md).
 
 ---
 

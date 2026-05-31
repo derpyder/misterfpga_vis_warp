@@ -1,3 +1,12 @@
+> **🧭 CURRENT ENGINE DIRECTION.** Block A (the cylinder look) is "good enough" on
+> Template and the res-adaptive calibration is HW-validated. The **Stage-2 buffer
+> reclaim** (§3) is now **coupled** with the hi-res line-doubling fix —
+> [`SPEC-hires-warp-2026-05-30.md`](./SPEC-hires-warp-2026-05-30.md) — because the
+> reclaim is exactly what makes the 2×-wide hi-res buffer affordable. Build them
+> together. Where things stand: [`STATUS.md`](./STATUS.md).
+
+---
+
 # SPEC — Cylindrical warp mode (v2: the structurally-smaller engine)
 
 **Status:** spec, ready to build. **Written:** 2026-05-29.

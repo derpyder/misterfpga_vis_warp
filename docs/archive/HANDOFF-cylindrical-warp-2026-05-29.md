@@ -1,3 +1,12 @@
+> **📦 ARCHIVED — superseded session handoff.** Its live state is folded into
+> [`STATUS.md`](../../STATUS.md), its design into
+> [`SPEC-cylindrical-warp.md`](../../SPEC-cylindrical-warp.md), and its dev-loop
+> tooling into [`CONTRIBUTING.md`](../../CONTRIBUTING.md). Predates the
+> line-doubling discovery and its fix —
+> [`SPEC-hires-warp-2026-05-30.md`](../../SPEC-hires-warp-2026-05-30.md).
+
+---
+
 # HANDOFF — vis_warp cylindrical warp + Block A (2026-05-29)
 
 **Resume point for a fresh instance.** Read this first, then

@@ -1,3 +1,13 @@
+> **📐 FOUNDATIONAL ARCHITECTURE REFERENCE** — still authoritative for SITE C
+> placement, the M9K engine, the 5-layer framework integration, and the HPS
+> `0x45` command path. **No longer the active work driver:** the engine direction
+> moved to [`SPEC-cylindrical-warp.md`](./SPEC-cylindrical-warp.md), and the
+> current quality blocker + fix live in
+> [`SPEC-hires-warp-2026-05-30.md`](./SPEC-hires-warp-2026-05-30.md).
+> Where things stand now: [`STATUS.md`](./STATUS.md).
+
+---
+
 # vis_warp v3 — Template_MiSTer-VIS integration spec
 
 Written 2026-05-28 after the v1→v2 ghost chase
@@ -5,8 +15,10 @@ Written 2026-05-28 after the v1→v2 ghost chase
 the framework research that followed
 (`~/.claude/projects/D--deck/memory/reference_mister_framework.md`).
 
-This is the actively driving document for the vis_warp work going forward.
-Open questions land here; locked decisions land in
+This is the **foundational integration spec** — the locked architecture (SITE C,
+the M9K engine, framework wiring, the HPS `0x45` path). The *active* work has
+since moved to the cylindrical engine and the hi-res line-doubling fix (see the
+banner above and [`STATUS.md`](./STATUS.md)). Locked decisions also land in
 `design_vis_warp_constraints.md` (memory).
 
 ## TL;DR — what changed and why

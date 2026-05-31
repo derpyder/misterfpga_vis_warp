@@ -1,3 +1,11 @@
+> **📦 ARCHIVED — superseded session handoff.** Kept for the lesson, not as live
+> state. The Galaga `MISTER_FB=1` dead-port finding (ASCAL reads from DDR and
+> ignores the live `i_r/i_g/i_b` input where SITE C sits) is captured in
+> [`LIMITATIONS.md`](../../LIMITATIONS.md) §3 and the framework-reference memory.
+> Current project state: [`STATUS.md`](../../STATUS.md).
+
+---
+
 # ⚠️ RESOLVED 2026-05-28 — DO NOT NEED SIGNALTAP. ROOT CAUSE FOUND.
 
 **The Galaga "vanilla" mystery is SOLVED by static analysis + a force-red

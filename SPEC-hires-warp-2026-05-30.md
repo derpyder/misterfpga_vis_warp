@@ -1,3 +1,11 @@
+> **🎯 ACTIVE FIX — start here for the line-doubling work.** Sim-proven by the
+> bit-exact model, **not built**. Coupled with the Stage-2 reclaim in
+> [`SPEC-cylindrical-warp.md`](./SPEC-cylindrical-warp.md) §3 (the reclaim is what
+> pays for the 2× width). Next concrete step = build-order **step 0** (§4).
+> Where things stand: [`STATUS.md`](./STATUS.md).
+
+---
+
 # SPEC — hi-res internal warp (the real fix for line-doubling)
 
 **Status:** spec, sim-proven, NOT built. **Written 2026-05-30.**
