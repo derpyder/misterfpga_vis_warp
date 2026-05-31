@@ -27,7 +27,9 @@ use std.textio.all;
 
 entity tb_warp_stage0 is
     generic (DUT_N_LINES : integer := 128;   -- 128 = spherical; 2 = cylindrical reclaim
-             DUT_BIL     : integer := 1);    -- 1 = bilinear, 0 = nearest-neighbour
+             DUT_BIL     : integer := 1;     -- 1 = bilinear, 0 = nearest-neighbour
+             CE_DIV      : integer := 1);    -- input ce_pix period in clks (>=2 = headroom
+                                             --   for hi-res 2x output emit)
 end entity;
 
 architecture sim of tb_warp_stage0 is
@@ -103,20 +105,27 @@ begin
             hs_out => hs_out, vs_out => vs_out, de_out => de_out
         );
 
-    -- ---- input raster generator (ce_pix='1' every clk) ----
+    -- ---- input raster generator (ce_pix pulses every CE_DIV clks) ----
+    -- Inputs are registered from (ix,iy) and ce_pix is registered together, so the
+    -- whole stream is delayed 1 clk uniformly -> the engine sees pixel(ix) on the
+    -- clk where ce_pix='1'. The raster advances one pixel per ce_pix. CE_DIV=1
+    -- reproduces the old ce-every-clk behaviour; CE_DIV>=2 leaves clk headroom for
+    -- a 2x-rate output emit (hi-res).
     input_gen : process(clk)
         variable ix : integer range 0 to W_TOTAL-1 := 0;
         variable iy : integer range 0 to V_TOTAL-1 := 0;
         variable fr : integer := 0;
+        variable ph : integer range 0 to 31 := 0;
         variable lit : boolean;
     begin
         if rising_edge(clk) then
             if reset = '1' then
-                ix := 0; iy := 0; fr := 0;
+                ix := 0; iy := 0; fr := 0; ph := 0;
+                ce_pix <= '0';
                 hs_in <= '0'; vs_in <= '0'; de_in <= '0';
                 r_in <= x"00"; g_in <= x"00"; b_in <= x"00";
             else
-                -- sync for current (ix,iy)
+                -- sync + pattern for current (ix,iy), held across the non-ce clks
                 if ix >= HS_START and ix < HS_END then hs_in <= '1'; else hs_in <= '0'; end if;
                 if iy >= VS_START and iy < VS_END then vs_in <= '1'; else vs_in <= '0'; end if;
                 if ix < W_ACT and iy < H_ACT then
@@ -131,17 +140,24 @@ begin
                     de_in <= '0';
                     r_in <= x"00"; g_in <= x"00"; b_in <= x"00";
                 end if;
-                -- advance one pixel
-                if ix = W_TOTAL-1 then
-                    ix := 0;
-                    if iy = V_TOTAL-1 then
-                        iy := 0; fr := fr + 1;
-                        if fr >= N_FRAMES then done <= true; end if;
+                -- ce_pix every CE_DIV clks; advance the raster on the ce clk
+                if ph = CE_DIV - 1 then
+                    ce_pix <= '1';
+                    ph := 0;
+                    if ix = W_TOTAL-1 then
+                        ix := 0;
+                        if iy = V_TOTAL-1 then
+                            iy := 0; fr := fr + 1;
+                            if fr >= N_FRAMES then done <= true; end if;
+                        else
+                            iy := iy + 1;
+                        end if;
                     else
-                        iy := iy + 1;
+                        ix := ix + 1;
                     end if;
                 else
-                    ix := ix + 1;
+                    ce_pix <= '0';
+                    ph := ph + 1;
                 end if;
             end if;
         end if;

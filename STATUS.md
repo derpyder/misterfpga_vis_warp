@@ -138,6 +138,21 @@ FIFO. Revised order: **Stage-0 sim → Stage-2 reclaim → hi-res width.**
   `side_pipe(15).cnt_y_o` aligns them. Spherical's ±64 window had hidden it.
   **Next:** USER Quartus build to confirm RAM ~105/553 + timing; then (optional)
   shrink the 65536-deep sync FIFO (~20 M9K) for the 1-line lag; then hi-res width.
+- **Stage 3 (hi-res 2× width) — design locked; TB foundation laid; engine next.**
+  Kills the remaining *horizontal* 1px doubling (cyl already killed the vertical),
+  on the cyl passthrough. **Read-double mechanism** (cheaper than the SPEC's
+  write-double): keep the W-wide buffer; the output raster becomes 2W; output col
+  `ox∈[0,2W)` warps in 2W space and reads `buffer[src_x/2]` (LSB → bilinear frac) =
+  NN-upscale-then-warp (warp_bitexact-proven) without enlarging the buffer.
+  **Output-ce is the crux:** ascal samples on `ce_pix_out`, today tied to `ce_pix_in`
+  (`vis_warp.vhd:286`); hi-res needs it = a **2× ce** (`ce_pix_dly OR +1clk`; needs
+  ≥2× clk headroom — true for arcade cores). Engine gains: an `OUT_SCALE` generic, a
+  `ce_pix_out` port, a 0..2W cursor, src_x in 2W space, the read-double, regenerated
+  de/hs, AX2 fed the 2× width. Wrapper wires `ce_pix_out` from the engine.
+  **Done (committed):** the Stage-0 TB is `CE_DIV`-parameterized — `CE_DIV=1`
+  reproduces 712/720; `CE_DIV≥2` is the headroom hi-res needs. **Next:** the engine
+  `OUT_SCALE=2` path + extend the TB (`CE_DIV=2`, capture 2W on `ce_pix_out`, gate
+  runs==src at Robotron's 296).
 
 ## Parked (still useful, not the path forward)
 
