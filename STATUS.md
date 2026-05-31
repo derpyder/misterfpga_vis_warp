@@ -20,10 +20,18 @@ HDMI mode.
   warp of 1-pixel content (grid lines, text) renders single rows as two — a
   Nyquist wall, **proven bit-exact**, not a tuning bug. So no current build is
   shippable as a polished release yet.
-- **The fix is specced and sim-proven, not built:** warp at 2× internal
-  resolution and output at 2×, letting ascal downscale (crt-royale's method).
-  Affordable **only because** the cylindrical Stage-2 buffer reclaim frees the
-  M9K — so hi-res warp and the reclaim are now **one coupled effort**.
+- **The fix — hi-res 2× warp — is in progress (sim-first).** Warp at 2× internal
+  res and output at 2×, ascal downscales (crt-royale's method). Affordable because
+  the cylindrical Stage-2 buffer reclaim freed the M9K, so the two are one effort.
+  **Done in sim:** the reclaim (pixel buffer ~165 → ~3 M9K, GATE PASS, spherical
+  byte-identical) + the hi-res design + the TB foundation. **Not built:** the
+  engine 2× output path.
+- **▶ RESUME HERE (next instance):** implement the engine hi-res `OUT_SCALE=2` path
+  — see [The plan → Stage 3](#the-plan-sim-first-then-one-hardware-build) (design
+  locked: read-double + a 2× `ce_pix_out`; the GHDL rig `sim/tb_warp_stage0.vhd`
+  with `-gCE_DIV=2` gates it). All work is on `main` = `feature` @ `4586d22`,
+  pushed. USER's parallel gate: a Quartus build of the cyl reclaim (expect RAM
+  ~105–125/553) to confirm the M9K win on silicon.
 
 ---
 
