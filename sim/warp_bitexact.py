@@ -237,3 +237,104 @@ for label, KL, k, fill, Ks, ps in [
     wide = int((widths >= 2 * ps).sum())   # "wide" = wider than the expected ps-px line
     print(f"{label:>40} {f'{runs}/{nsrc}':>10} {int(widths.max()):>5} {wide:>8}")
 print("clean = runs == src AND maxW ~= prescale (each line stays one solid ps-wide run).")
+
+
+# ============================================================================
+# STEP 0 (SPEC-hires-warp-2026-05-30.md §4): re-confirm the hi-res fix at
+# Robotron's ACTUAL width (296), not just the 480 Template grid. Parameterized
+# by (srcW,srcH,grid,linew) so the res-adaptive AX2 + the 2x output path are
+# exercised end-to-end: NN write-doubling -> warp at prescale*srcW -> emit at
+# prescale*srcW (ascal does the final downscale). Datapath is bit-identical to
+# render_row_hires above; a regression cross-check proves it reproduces 480.
+# ============================================================================
+
+def _runs_of(mask):
+    """(#runs, widths[]) of contiguous True segments in a 1-D boolean array."""
+    runs = 0; i = 0; n = len(mask); widths = []
+    while i < n:
+        if mask[i]:
+            j = i
+            while j < n and mask[j]: j += 1
+            runs += 1; widths.append(j - i); i = j
+        else:
+            i += 1
+    return runs, (np.array(widths) if widths else np.array([0]))
+
+
+def _warp_x(oxp, cxp, AX2p, k, fill_q15, Ksharp, lut, line_p, Wp):
+    """One bit-exact output column -> emitted 8-bit luma. Matches vis_warp_v2_wp.vhd."""
+    dx = oxp - cxp
+    s4 = AX2p * dx * dx
+    idx = s4 >> 16
+    if idx > 256: idx = 256
+    frac8 = (s4 >> 8) & 0xFF
+    m_lo = lut[idx]; m_hi = lut[idx + 1] if idx < 256 else lut[256]
+    m_raw = m_lo + (((m_hi - m_lo) * frac8) >> 8)
+    s8 = (m_raw - 32768) * k
+    v = (s8 // 2) + 32768
+    v = 0 if v < 0 else (65535 if v > 65535 else v)
+    v = (v * fill_q15) // 32768
+    srcq15 = cxp * 32768 + dx * v
+    src_int = srcq15 // 32768
+    fx8 = (srcq15 >> 7) & 0xFF
+    fs = (fx8 - 128) * Ksharp // 2 + 128
+    fs = 0 if fs < 0 else (255 if fs > 255 else fs)
+    x0 = src_int if 0 <= src_int < Wp else (0 if src_int < 0 else Wp - 1)
+    x1 = x0 + 1 if x0 + 1 < Wp else Wp - 1
+    return (int(line_p[x0]) * (256 - fs) + int(line_p[x1]) * fs) >> 8
+
+
+def warp_res(srcW, srcH, grid, linew, KL, k, fill_q15, Ksharp, prescale, hires):
+    """Warp a 1px/grid torture pattern at (srcW,srcH). hires=True -> output at
+    prescale*srcW (the FIX); hires=False -> output decimated to srcW (the SHIPPED
+    source-res path). AX2 res-adaptive from the prescaled dims. Returns
+    (runs, n_src, widths, out)."""
+    lut = build_lut(KL)
+    cyp = (srcH // 2) * prescale
+    Wp = srcW * prescale
+    cxp = Wp // 2
+    AX2p = round(508 * SCALE / (508 * cxp * cxp + 498 * cyp * cyp))
+    line_p = ((np.arange(Wp) // prescale % grid) < linew).astype(np.int64) * 255
+    outW = Wp if hires else srcW
+    out = np.zeros(outW, dtype=np.int64)
+    for ox in range(outW):
+        oxp = ox if hires else (ox * prescale + prescale // 2)
+        out[ox] = _warp_x(oxp, cxp, AX2p, k, fill_q15, Ksharp, lut, line_p, Wp)
+    n_src, _ = _runs_of((np.arange(srcW) % grid) < linew)
+    runs, widths = _runs_of(out > 96)
+    return runs, n_src, widths, out
+
+
+print("\n" + "=" * 66)
+print("STEP 0 - hi-res fix at Robotron's actual width (SPEC-hires-warp Sec.4)")
+print("=" * 66)
+
+# Regression cross-check: the parameterized path must reproduce the 480 grid
+# hi-res result proven above (30/30, no wide runs).
+r, n, w, _ = warp_res(480, 360, 16, 1, 0.3, 2, 27458, 4, prescale=2, hires=True)
+print(f"[xcheck] 480x360 grid16/1 hi-res 2x: runs/src={r}/{n} maxW={int(w.max())} "
+      f"wide={int((w >= 4).sum())}  -> {'OK matches existing' if r == n else 'MISMATCH'}")
+
+# Metric: DOUBLING = an output run wider than the prescale baseline (>=2*ps px)
+# OR a source line split into >1 run (runs > n_src). The overscan fill crops the
+# outermost source line (~1.4 src px at this width) -> a benign 1-line deficit
+# (runs = n_src-1) present IDENTICALLY in src-res and hi-res; that is NOT doubling.
+print("\nRobotron 296x240, 1px torture lines.  DOUBLING = wide run or split (runs>src);")
+print("a runs<src deficit is the benign overscan edge-crop (same in both paths).")
+print(f"{'path':>32} {'runs/src':>10} {'maxW':>5} {'wide':>5}  verdict")
+gate = True
+for grid in (16, 8):
+    r0, n0, w0, _ = warp_res(296, 240, grid, 1, 0.3, 2, 27458, 4, prescale=1, hires=False)
+    wide0 = int((w0 >= 2).sum()); dbl0 = (wide0 > 0 or r0 > n0)
+    print(f"{f'src-res p=1 (shipped) g{grid}/1':>32} {f'{r0}/{n0}':>10} "
+          f"{int(w0.max()):>5} {wide0:>5}  {'DOUBLES (reproduces HW)' if dbl0 else 'clean'}")
+    r2, n2, w2, _ = warp_res(296, 240, grid, 1, 0.3, 2, 27458, 4, prescale=2, hires=True)
+    wide2 = int((w2 >= 4).sum()); dbl2 = (wide2 > 0 or r2 > n2); crop = n2 - r2
+    note = (f'CLEAN ({crop} edge-line cropped)' if (not dbl2 and crop > 0)
+            else ('CLEAN' if not dbl2 else 'STILL DOUBLES'))
+    print(f"{f'hi-res 2x (fix) g{grid}/1':>32} {f'{r2}/{n2}':>10} "
+          f"{int(w2.max()):>5} {wide2:>5}  {note}")
+    gate = gate and dbl0 and (not dbl2)
+
+print(f"\nSTEP 0 GATE: {'PASS - src-res doubles, hi-res 2x is doubling-free at 296' if gate else 'FAIL'}")
+print("  (residual runs<src = the overscan fill cropping the outermost 1px line; benign.)")

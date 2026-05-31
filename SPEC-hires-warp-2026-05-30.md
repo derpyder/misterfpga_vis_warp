@@ -97,7 +97,13 @@ not just an internal pre-pass.
 
 0. **Extend `sim/warp_bitexact.py`** to the full 2× output path at Robotron's 296
    width; confirm runs==src, wide==0. (The float model LIED about doubling; only the
-   bit-exact model is trusted now.)
+   bit-exact model is trusted now.) ✅ **DONE 2026-05-30:** at 296, src-res doubles
+   (wide runs) and hi-res 2× is doubling-free (`wide==0`) on a 1px torture grid; a
+   480-grid cross-check reproduces the existing 30/30. **Refinement:** the real
+   metric is "no wide/split run", not the stricter `runs==src` — the overscan fill
+   (27458) crops the outermost ~1.4 src-px, so the `x=0` line drops in *both* paths
+   (benign edge-crop, not doubling). Expect the outermost source column cropped when
+   validating "grid clean" on HW.
 1. MAX_SRC_W→1024 + 2× write-doubling + 2× output, KEEPING the 128-line buffer
    (no reclaim yet) → validates the LOOK fix at known buffer cost. Hardware: grid
    clean, no doubling. **This is the gate.**

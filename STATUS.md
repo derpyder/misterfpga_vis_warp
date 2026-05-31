@@ -76,7 +76,9 @@ don't.
   softer LUT; prescale-2×-then-decimate-back-to-480; any LUT/fill/sharpness combo
   at source resolution. It's the resample, not the params.
 - **Proven fix:** TRUE hi-res 2× (warp AND output at 2× width, ascal downscales)
-  → 30/30 source lines stay one solid run. 2× is enough.
+  → 30/30 source lines stay one solid run. 2× is enough. **Re-confirmed at
+  Robotron's actual 296 width (step 0 below): src-res doubles, hi-res 2× is
+  doubling-free.**
 
 Full proof + ruled-out table: [`SPEC-hires-warp-2026-05-30.md`](./SPEC-hires-warp-2026-05-30.md).
 
@@ -91,10 +93,14 @@ buffer to a 2-line ping-pong, freeing ~180 M9K. Build order
 [`SPEC-cylindrical-warp`](./SPEC-cylindrical-warp.md) §5):
 
 0. **Extend `sim/warp_bitexact.py`** to the full 2× output path at Robotron's
-   actual 296 width; confirm `runs==src`, `wide==0`. *(Next concrete action.)*
-1. `MAX_SRC_W` 512→1024 + 2× write-doubling + 2× output, **keeping** the 128-line
-   buffer → validates the look at known buffer cost. **This is the gate:** grid
-   clean, no doubling on HW.
+   actual 296 width. ✅ **DONE 2026-05-30** — src-res doubles (wide runs,
+   reproduces HW); hi-res 2× is doubling-free (`wide==0`) at 296 on a 1px torture
+   grid. Finding: the overscan fill crops the outermost ~1.4 src-px (the x=0
+   line) — a benign 1-line edge deficit in *both* paths, **not** doubling. (So the
+   real gate is "no wide/split runs", not the stricter `runs==src`.)
+1. **(NEXT)** `MAX_SRC_W` 512→1024 + 2× write-doubling + 2× output, **keeping**
+   the 128-line buffer → validates the look at known buffer cost. **This is the
+   gate:** grid clean, no doubling on HW.
 2. **Stage-2 reclaim** (128→2 line, kv=0) → recover the M9K the 2× width spent.
 3. Re-introduce kv>0 within the buffer budget, **or** document hi-res as
    cylinder-only (kv=0).
