@@ -113,6 +113,7 @@ architecture wrapper of vis_warp is
     signal reg_enable     : std_logic := '1';                       -- ENABLED for Phase 4 test
     signal reg_curvature  : std_logic_vector(2 downto 0) := "010";  -- k=2 (overall bow / H)
     signal reg_curvature_v : std_logic_vector(2 downto 0) := "000"; -- v3.4 Block A: V-bow blend; 0=flat rows (X-barrel default)
+    signal reg_curvature_h : std_logic_vector(2 downto 0) := "000"; -- H-bow blend: 0=straight verticals (default); >0 curves columns (needs spherical N=128)
     -- LIVE (v3.1 — bilinear pixel fetch in vis_warp_v2_wp):
     -- Default '1' for Phase 5 default-on dev-time testing; HPS-driven
     -- runtime control comes with the v4 Main_MiSTer userland PR.
@@ -166,6 +167,8 @@ architecture wrapper of vis_warp is
     signal reg_curvature_s2   : std_logic_vector(2 downto 0) := "000";
     signal reg_curvature_v_s1 : std_logic_vector(2 downto 0) := "000";
     signal reg_curvature_v_s2 : std_logic_vector(2 downto 0) := "000";
+    signal reg_curvature_h_s1 : std_logic_vector(2 downto 0) := "000";
+    signal reg_curvature_h_s2 : std_logic_vector(2 downto 0) := "000";
     signal reg_sharpness_s1   : std_logic_vector(2 downto 0) := "010";
     signal reg_sharpness_s2   : std_logic_vector(2 downto 0) := "010";
     signal reg_bilinear_s1    : std_logic := '0';
@@ -182,6 +185,8 @@ architecture wrapper of vis_warp is
     attribute preserve of reg_curvature_s2 : signal is true;
     attribute preserve of reg_curvature_v_s1 : signal is true;
     attribute preserve of reg_curvature_v_s2 : signal is true;
+    attribute preserve of reg_curvature_h_s1 : signal is true;
+    attribute preserve of reg_curvature_h_s2 : signal is true;
     attribute preserve of reg_sharpness_s1 : signal is true;
     attribute preserve of reg_sharpness_s2 : signal is true;
     attribute preserve of reg_bilinear_s1  : signal is true;
@@ -208,6 +213,7 @@ begin
                     when OP_CURVATURE =>
                         reg_curvature   <= v_payload(2 downto 0);
                         reg_curvature_v <= v_payload(5 downto 3);  -- v3.4 Block A: packed V-bow
+                        reg_curvature_h <= v_payload(8 downto 6);  -- packed H-bow (kh), runtime-ready
                     when OP_BLOOM =>   -- v3.3d: opcode 010 repurposed bloom → sharpness
                         reg_sharpness <= v_payload(2 downto 0);
                     when OP_SCANLINES =>
@@ -245,6 +251,8 @@ begin
             reg_curvature_s2 <= reg_curvature_s1;
             reg_curvature_v_s1 <= reg_curvature_v;
             reg_curvature_v_s2 <= reg_curvature_v_s1;
+            reg_curvature_h_s1 <= reg_curvature_h;
+            reg_curvature_h_s2 <= reg_curvature_h_s1;
             reg_sharpness_s1 <= reg_sharpness;
             reg_sharpness_s2 <= reg_sharpness_s1;
             reg_bilinear_s1  <= reg_bilinear;
@@ -277,6 +285,7 @@ begin
             warp_en     => reg_enable_s2,
             curvature_k => unsigned(reg_curvature_s2),
             curvature_v => unsigned(reg_curvature_v_s2),
+            curvature_h => unsigned(reg_curvature_h_s2),
             sharpness   => unsigned(reg_sharpness_s2),
             bilinear_en => reg_bilinear_s2,
 

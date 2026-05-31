@@ -72,6 +72,7 @@ entity vis_warp_v2_wp is
         bilinear_en : in  std_logic;        -- 1=bilinear (4-bank pixel fetch), 0=NN
         sharpness   : in  unsigned(2 downto 0);  -- sharp-bilinear K (1=soft..7=near-NN); runtime
         curvature_v : in  unsigned(2 downto 0) := (others => '0');  -- v3.4 Block A: V-bow blend; 0=flat rows (X-barrel), 7=~radial
+        curvature_h : in  unsigned(2 downto 0) := (others => '0');  -- H-bow blend: 0=straight verticals (x²-only), 7=~radial (columns curve)
 
         ce_pix      : in  std_logic;        -- pixel enable
 
@@ -715,6 +716,8 @@ begin
         variable v_frac    : unsigned(7 downto 0);
         variable v_m_acc   : integer;
         variable v_my      : integer;   -- v3.4 Block A: blended vertical magnitude
+        variable v_mx      : integer;   -- kh: blended horizontal magnitude (x²-only → radial)
+        variable v_rad_fx  : integer;   -- radial magnitude with the X overscan fill applied
         variable v_src_x_q15 : integer;
         variable v_src_y_q15 : integer;
         variable v_src_x_pre : integer;
@@ -968,14 +971,20 @@ begin
                 v_m_acc := (v_m_acc * OVERSCAN_X_Q15) / 32768;
                 s9x_m_scaled <= to_unsigned(v_m_acc, 16);
 
-                -- Stage 10: dx·Mx, dy·My (separable cylinder)
-                -- X uses s9x_m_scaled (from x²-only LUT) -> horizontal bow only,
-                --   vertical lines stay STRAIGHT (not bowed by y-position).
-                -- Y blends between identity (32768=flat rows) and the Y bow by kv/8.
-                --   kv=0 => src_y=out_y exactly (score row flat, full reclaim ready)
-                --   kv=7 => full Y bow (~radial)
+                -- Stage 10: dx·Mx, dy·My (separable cylinder + optional H/V bow blends)
+                -- X magnitude blends x²-only (s9x_m_scaled = straight verticals) toward the
+                --   RADIAL magnitude (s9_m_scaled, with the X overscan fill applied) by kh/8.
+                --   kh=0 => x²-only (straight verticals; byte-identical to before). kh>0 =>
+                --   the radial X depends on y, so the COLUMNS curve (horizontal bow). The
+                --   fill is a linear scale, so blending the two POST-fill magnitudes equals
+                --   blending pre-fill then filling -- no extra pipeline register needed.
+                -- Y blends identity (32768=flat rows) toward the radial by kv/8.
+                --   kv=0 => src_y=out_y (flat rows); kv=7 => full Y bow (~radial).
+                v_rad_fx := (to_integer(s9_m_scaled) * OVERSCAN_X_Q15) / 32768;
+                v_mx := to_integer(s9x_m_scaled)
+                      + ((v_rad_fx - to_integer(s9x_m_scaled)) * to_integer(curvature_h)) / 8;
                 v_my := 32768 + ((to_integer(s9_m_scaled) - 32768) * to_integer(curvature_v)) / 8;
-                s10_dx_m <= resize(side_pipe(12).dx * signed('0' & std_logic_vector(s9x_m_scaled)), s10_dx_m'length);
+                s10_dx_m <= resize(side_pipe(12).dx * to_signed(v_mx, 18), s10_dx_m'length);
                 s10_dy_m <= resize(side_pipe(12).dy * to_signed(v_my, 17), s10_dy_m'length);
 
                 -- Stage 10b: src_q15 = (DST_C << 15) + dx·M

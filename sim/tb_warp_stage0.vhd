@@ -39,6 +39,8 @@ entity tb_warp_stage0 is
              N_FRAMES_G  : integer := 6;     -- enough to clear the sync-FIFO fill
              KV_G        : integer := 0;     -- curvature_v (kv): 0 = cyl/flat rows, >0 = radial
                                              --   vertical bow (spherical look; needs N_LINES=128).
+             KH_G        : integer := 0;     -- curvature_h (kh): 0 = straight verticals (x²-only),
+                                             --   >0 = horizontal bow (columns curve; needs N=128).
              SHARP_G     : integer := 4);    -- sharp-bilinear K (runtime `sharpness`).
                                              --   4 = dev-default (near-NN); at OUT_SCALE=2 the
                                              --   2x res already supplies crispness, so a SOFTER
@@ -70,6 +72,7 @@ architecture sim of tb_warp_stage0 is
     signal warp_en     : std_logic := '1';
     signal curvature_k : unsigned(2 downto 0) := "010"; -- k=2
     signal curvature_v : unsigned(2 downto 0) := to_unsigned(KV_G, 3); -- kv (0=cyl, >0=radial V-bow)
+    signal curvature_h : unsigned(2 downto 0) := to_unsigned(KH_G, 3); -- kh (0=straight verts, >0=H-bow)
     signal bilinear_en : std_logic := '1';  -- driven from DUT_BIL below
     signal sharpness   : unsigned(2 downto 0) := to_unsigned(SHARP_G, 3); -- sharp-bilinear K
     signal ce_pix      : std_logic := '1';              -- 1 pixel per clk (CE_DIV=1)
@@ -115,6 +118,7 @@ begin
             bilinear_en => bilinear_en,
             sharpness   => sharpness,
             curvature_v => curvature_v,
+            curvature_h => curvature_h,
             ce_pix      => ce_pix,
             r_in => r_in, g_in => g_in, b_in => b_in,
             hs_in => hs_in, vs_in => vs_in, de_in => de_in,
