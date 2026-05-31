@@ -80,10 +80,42 @@ minimal-cost first cut.
 ## IMPLEMENTATION PLAN (priority)
 1. **Res-adaptive calibration** (aspect weights + fill computed from detected
    src_w/src_h) — REQUIRED before main-merge / consumer cores. Removes the hardcoded
-   480×360 assumption.
-2. **Jacobian-gated variable-box prefilter** — worst-case-clean polish. Prototype in
-   the faithful model (`sim/warp_faithful_2d.py`, already has the bilinear sampler)
-   before RTL.
+   480×360 assumption. ✅ **DONE + HW-validated 2026-05-30** (`sys/vis_warp_rescal.vhd`).
+2. **Jacobian-gated variable-box prefilter** — ❌ **VALIDATED UNNECESSARY 2026-05-30
+   (sim + eyeball). NOT BUILT. Don't re-litigate.** See the empirical finding below.
+
+## EMPIRICAL FINDING 2026-05-30 — the prefilter is NOT worth building (Decision 2 corrected)
+Decision 2 above theorized the prefilter "mandatory" by analogy to crt-lottes. The
+sim (`sim/warp_prefilter.py`) measured the real regime and **overturns that**:
+- **The analytic Jacobian is trivial** and validated: for the separable cylinder X
+  warp, `J = d(src_x)/d(ox) = (1 + 3a·dx²)/edge_M = (3·Meff − 2)/edge_M` — a closed
+  form of the ALREADY-COMPUTED `Meff` (no ddx/ddy, no extra multiply). Matches the
+  numerical gradient to LUT-quantization precision.
+- **But the minification is MILD at SITE-C source-res.** `J_max` is only **1.32 (k=2)
+  → 1.81 (k=7)** — under 2 source px per output px. That's far too gentle to alias
+  visibly: at our content frequencies it's barely above Nyquist.
+- **Measured vs an EXACT continuous area-average reference** (closed-form integral of
+  the line field over each output pixel's source preimage — not a circular sampled
+  ref), in the minifying band, on the **worst-case 1px grid**:
+  | k | bilinear MAE/MAX/HF | gated box | gated tent (2-box) | 3× supersample |
+  |---|---|---|---|---|
+  | 2 | 0.097/0.499/0.392 | 0.088/0.500/**0.339** | (tent ≈ box) | 0.094/0.496/0.355 |
+  | 7 | 0.092/0.489/0.464 | 0.105/0.500/**0.355** | — | 0.097/0.530/0.390 |
+  MAE/MAX barely move (box even worsens MAX at k=7); only **HF energy** (the aliasing
+  proxy) drops ~15–24%. The **cheap box beats 3× supersample** on HF (0.355 vs 0.390)
+  — i.e. the research-doc priority was inverted: if anything, box > supersample here.
+- **Eyeball verdict (user, 2026-05-30):** on the k=7 / 1px torture render
+  (`sim/warp_out/warp_prefilter.png`: bilinear vs box vs tent/super vs exact ref),
+  **"it all looks the same to my eyes."** On the *worst* possible input, the
+  improvement is invisible → on real game art at shipped k=2 it's beyond invisible.
+- **Conclusion:** the prefilter buys no visible quality for the silicon + engine-risk
+  (v3.3 cautionary tale). **Block A ships as-is.** A prefilter would only matter in a
+  HEAVY-minification regime (J ≫ 1): hi-res source cores or extreme curvature — which
+  source-res SITE C does not reach. **If that regime ever arrives, the gated running
+  box is the option of record** (sim-proven bit-equal to its HW add-on-enter/
+  subtract-on-leave form; box ≥ supersample at our J). Until then: do not build.
+
+### (superseded theory retained below for the reasoning trail)
 
 *Sources: the 4 agent reports (this session's transcript). MiSTer ascal: no downscale
 AA. LDC IP magnifies → no minification AA. Minification AA = mipmap/anisotropic.*

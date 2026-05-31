@@ -95,7 +95,20 @@ Make the weights compute per-frame from the detected source dims.
   resolutions, assert ax2/ay2 == golden values) BEFORE integrating into stage 3.
   Then GHDL-analyze the full engine. (User runs the Quartus compile to validate.)
 
-## IMMEDIATE NEXT TASK — minification prefilter (quality fix) — validated in sim, NOT implemented
+## RESOLVED 2026-05-30 — minification prefilter VALIDATED UNNECESSARY (NOT built)
+**Don't re-litigate.** Sim (`sim/warp_prefilter.py`) + user eyeball on the k=7 / 1px
+worst-case render: bilinear ≈ box ≈ tent ≈ supersample ≈ exact reference ("it all
+looks the same to my eyes"). At SITE-C source-res the minification is mild (J_max
+1.32@k2 → 1.81@k7, <2 src px/out px) — too gentle to alias visibly. Only HF energy
+drops ~15–24% (box ≥ supersample there); MAE/MAX don't move. Block A ships as-is.
+A prefilter only matters at J≫1 (hi-res source / extreme curvature), which we don't
+reach; if that ever changes, the gated running-box is the option of record (HW form
+sim-proven bit-equal). Full writeup: `RESEARCH-warp-quality-2026-05-29.md` →
+"EMPIRICAL FINDING 2026-05-30". Robotron-VIS got the res-adaptive cylinder propagated
++ pushed (kv=2); awaiting its hardware screenshot.
+
+### (original prefilter task spec retained below — superseded by the finding above)
+## THEN — minification prefilter (quality fix) — validated in sim, NOT implemented
 - **Decided approach** (RESEARCH doc, all 4 agents converge): a **Jacobian-gated,
   separable, variable-width running-box** prefilter in the X path, active only where
   local minification J>1, feeding the existing bilinear. ~few M9K, ~0 DSP. Cheap tier
