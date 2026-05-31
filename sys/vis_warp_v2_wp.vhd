@@ -48,7 +48,10 @@ use work.vis_warp_luts_pkg.all;
 entity vis_warp_v2_wp is
     generic (
         MAX_SRC_W : integer := 512;     -- max source width supported
-        N_LINES   : integer := 128;     -- M10K sliding-window depth
+        N_LINES   : integer := 128;     -- M10K sliding-window depth (2 = cyl reclaim)
+        CYL_MODE  : boolean := false;   -- true = cylindrical reclaim (kv=0, 2-line buffer,
+                                        --   horizontal-only bilinear). Compile-time; spherical
+                                        --   build (false) is byte-identical.
         ARX       : integer := 4;       -- aspect ratio (for warp math)
         ARY       : integer := 3
     );
@@ -90,6 +93,15 @@ entity vis_warp_v2_wp is
 end entity;
 
 architecture rtl of vis_warp_v2_wp is
+
+    -- f_log2: integer log2 (exact for powers of 2) for the lag-shift constant below.
+    function f_log2(n : integer) return integer is
+        variable r : integer := 0;
+        variable v : integer := n;
+    begin
+        while v > 1 loop v := v / 2; r := r + 1; end loop;
+        return r;
+    end function;
 
     -- ---- Derived sizes ----
     -- v3.1: pixel buffer is split into 4 banks by (x mod 2, y mod 2) so all
@@ -141,7 +153,7 @@ architecture rtl of vis_warp_v2_wp is
     -- onward uses learned dims. Defaults (288, 224) cover Galaga.
     signal det_x_in_line  : integer range 0 to MAX_SRC_W := 0;
     signal det_x_max      : integer range 0 to MAX_SRC_W := 0;
-    signal det_y_in_frame : integer range 0 to N_LINES * 4 := 0;
+    signal det_y_in_frame : integer range 0 to 4095 := 0;  -- frame-line count (NOT buffer depth)
     signal src_w_latched  : integer range 0 to MAX_SRC_W := 288;
     signal src_h_latched  : integer range 0 to 4095      := 224;
 
@@ -197,6 +209,11 @@ architecture rtl of vis_warp_v2_wp is
     constant SYNC_FIFO_RD_INIT  : integer := SYNC_FIFO_DEPTH - SYNC_FIFO_LATENCY; -- 16384
     constant LINE_LEN_MAX       : integer := 1023;  -- cap so (N/2)*line_len < DEPTH (1023*64=65472)
     constant LINE_LEN_MIN       : integer := 64;    -- ignore implausibly short lines (hs glitch)
+    -- Writer-lead = N_LINES/2 LINES; lag-shift = log2(N_LINES/2) so the self-tuning
+    -- delay scales with the buffer depth: 6 for the 128-line spherical build
+    -- (byte-identical to the old hardcoded shift-by-6), 0 for the 2-line cylindrical
+    -- reclaim (writer leads reader by exactly 1 line -> ping-pong; src_y=out_y at kv=0).
+    constant LAG_SHIFT          : integer := f_log2(N_LINES / 2);
 
     -- v3.3d SHARP-BILINEAR: steepens the bilinear blend fraction so pixels
     -- snap to their nearest source pixel (crisp) except a thin transition
@@ -467,8 +484,8 @@ begin
             elsif line_meas_cnt < to_unsigned(LINE_LEN_MAX, 12) then
                 line_meas_cnt <= line_meas_cnt + 1;
             end if;
-            -- target_lag = line_len * 64  (N_LINES/2). line_len<=1023 → <=65472.
-            target_lag <= shift_left(resize(line_len, 16), 6);
+            -- target_lag = line_len * (N_LINES/2) via LAG_SHIFT (6=spherical, 0=cyl).
+            target_lag <= shift_left(resize(line_len, 16), LAG_SHIFT);
         end if;
     end process;
 
@@ -993,6 +1010,15 @@ begin
                     v_line_min := 0;
                 end if;
                 v_line_max := cnt_y_o + (N_LINES / 2);
+                -- Cylindrical reclaim (SPEC-cylindrical §3.5/7): src_y=out_y (kv=0), so the
+                -- only valid read line is EXACTLY cnt_y_o. In the 2-line ping-pong, cnt_y_o+1
+                -- is the writer's mid-write line; allowing src_y to clamp up to it smears the
+                -- right edge (bright next-line bleeds in). Pin the window to the reader's
+                -- completed line. (Spherical build: CYL_MODE=false, byte-identical.)
+                if CYL_MODE then
+                    v_line_min := cnt_y_o;
+                    v_line_max := cnt_y_o;
+                end if;
                 v_src_y_fin := s11_src_y;
                 if v_src_y_fin > v_line_max then
                     v_src_y_fin := v_line_max;

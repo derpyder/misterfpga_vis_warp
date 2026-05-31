@@ -26,6 +26,8 @@ use ieee.numeric_std.all;
 use std.textio.all;
 
 entity tb_warp_stage0 is
+    generic (DUT_N_LINES : integer := 128;   -- 128 = spherical; 2 = cylindrical reclaim
+             DUT_BIL     : integer := 1);    -- 1 = bilinear, 0 = nearest-neighbour
 end entity;
 
 architecture sim of tb_warp_stage0 is
@@ -51,7 +53,7 @@ architecture sim of tb_warp_stage0 is
     signal warp_en     : std_logic := '1';
     signal curvature_k : unsigned(2 downto 0) := "010"; -- k=2
     signal curvature_v : unsigned(2 downto 0) := "000"; -- kv=0 -> cylinder, src_y=out_y
-    signal bilinear_en : std_logic := '1';
+    signal bilinear_en : std_logic := '1';  -- driven from DUT_BIL below
     signal sharpness   : unsigned(2 downto 0) := "100"; -- sharp-bilinear K=4
     signal ce_pix      : std_logic := '1';              -- 1 pixel per clk (CE_DIV=1)
 
@@ -69,6 +71,8 @@ architecture sim of tb_warp_stage0 is
 
 begin
 
+    bilinear_en <= '1' when DUT_BIL = 1 else '0';
+
     -- clock
     clk_proc : process
     begin
@@ -83,6 +87,7 @@ begin
 
     -- DUT: the engine, default generics (MAX_SRC_W=512, N_LINES=128)
     dut : entity work.vis_warp_v2_wp
+        generic map (N_LINES => DUT_N_LINES, CYL_MODE => (DUT_N_LINES = 2))
         port map (
             clk         => clk,
             reset       => reset,

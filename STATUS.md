@@ -121,6 +121,23 @@ FIFO. Revised order: **Stage-0 sim → Stage-2 reclaim → hi-res width.**
   drive the real engine with a synthetic grid raster and confirm `src_y==out_y` at
   kv=0 (horizontal lines on exact rows), straight verticals, symmetric warp. The
   reclaim's validation rig is ready — re-run it as the reclaim lands.
+- **Stage 2 (reclaim) — buffer collapse PROVEN; one sync-alignment bug left.** The
+  reclaim is mostly a generic: the banks are sized `BANK_DEPTH=(N_LINES/2)·(MAX_SRC_W/2)`,
+  so a cyl build = instantiate `vis_warp_v2_wp` with `N_LINES=2` (+ a `CYL_MODE`
+  generic). Landed on `feature` (spherical stays byte-identical):
+  `LAG_SHIFT=log2(N_LINES/2)` scales the self-tuning lag (was a hardcoded ×64);
+  `det_y_in_frame` range fixed (latent bug — was tied to `N_LINES`, overflowed at 2);
+  `CYL_MODE` generic + read-window pinned to `cnt_y_o`. **GHDL: spherical (N=128)
+  byte-identical GATE PASS; cyl (N=2) collapses the buffer and `src_y==out_y`
+  PASSES** → the M9K reclaim works (~165→~3 M9K pixel buffer).
+  **Remaining bug:** a right-edge smear on the row *before* each (even) horizontal
+  line — those pixels read the mid-write *next even line* from the even bank.
+  Root cause = a **1-line `cnt_y_o`-vs-emitted-sync skew** at line boundaries,
+  exposed by the now-tight 1-line lag (masked in spherical by the 64-line lag).
+  This is SPEC-cyl §3.6 (align the emitted output sync to the read cursor — the
+  v3.3-postmortem zone), **not** the buffer. Next: instrument `cnt_y_o` vs the
+  emitted `de_out` at line boundaries; align them (or rip the FIFO to a clean
+  1-line shift). Cyl WIP stays on `feature`, not `main`.
 
 ## Parked (still useful, not the path forward)
 
