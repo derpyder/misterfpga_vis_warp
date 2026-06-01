@@ -10,11 +10,14 @@
 
 
 set_global_assignment -name VERILOG_MACRO "MISTER_WARP=1"
-# MISTER_WARP_CYL: cylindrical-reclaim engine + 2x internal warp (OUT_SCALE=2) =
-# the line-doubling fix. ENABLED below, so this builds the fix directly — just
-# compile. Comment the next line out to fall back to the stock spherical source-res
-# warp. (kv=0 / cylinder-only: leave the V-bow at 0.)
-set_global_assignment -name VERILOG_MACRO "MISTER_WARP_CYL=1"
+# Engine select (pick at most one; HIRES wins if both set):
+#  MISTER_WARP_HIRES = spherical hi-res 2x warp (WARP_N_LINES=128, OUT_SCALE=2):
+#    barrel bow on BOTH axes + the line-doubling fix. This is the path Robotron
+#    shipped + HW-validated, and it pairs with the live OSD bow/vignette sliders.
+#  MISTER_WARP_CYL   = cylindrical-reclaim 2x warp (WARP_N_LINES=2): M9K-frugal,
+#    kv=0 (cylinder only). Comment BOTH out for stock spherical source-res warp.
+set_global_assignment -name VERILOG_MACRO "MISTER_WARP_HIRES=1"
+#set_global_assignment -name VERILOG_MACRO "MISTER_WARP_CYL=1"
 set_global_assignment -name TOP_LEVEL_ENTITY sys_top
 set_global_assignment -name PARTITION_NETLIST_TYPE SOURCE -section_id Top
 set_global_assignment -name PARTITION_FITTER_PRESERVATION_LEVEL PLACEMENT_AND_ROUTING -section_id Top

@@ -71,6 +71,15 @@ entity vis_warp is
         cmd_wr      : in  std_logic;
         cmd_in      : in  std_logic_vector(15 downto 0);
 
+        -- Live OSD tuning (clk_sys-domain status bits routed up from the core's
+        -- CONF_STR; CDC'd to clk_in inside). These SUPERSEDE the cmd-0x45 kv/kh
+        -- path on cores that wire them (e.g. Robotron's Vertical/Horizontal Bow
+        -- sliders). Default 0 = no bow, so cores that leave them unconnected are
+        -- unaffected (flat rows/cols; the hi-res crisp fix is independent of these).
+        osd_kv      : in  std_logic_vector(2 downto 0) := "000";  -- vertical bow
+        osd_kh      : in  std_logic_vector(2 downto 0) := "000";  -- horizontal bow
+        osd_k       : in  std_logic_vector(2 downto 0) := "010";  -- overall curve depth (default 2)
+
         -- Source side (= raw emu output, pre-ascal under site C wiring)
         ce_pix_in   : in  std_logic;
         r_in        : in  std_logic_vector(7 downto 0);
@@ -112,8 +121,10 @@ architecture wrapper of vis_warp is
     -- v4 Main_MiSTer userland PR.
     signal reg_enable     : std_logic := '1';                       -- ENABLED for Phase 4 test
     signal reg_curvature  : std_logic_vector(2 downto 0) := "010";  -- k=2 (overall bow / H)
-    signal reg_curvature_v : std_logic_vector(2 downto 0) := "000"; -- v3.4 Block A: V-bow blend; 0=flat rows (X-barrel default)
-    signal reg_curvature_h : std_logic_vector(2 downto 0) := "000"; -- H-bow blend: 0=straight verticals (default); >0 curves columns (needs spherical N=128)
+    -- Dead cmd-0x45 path (retained for a future firmware route). The engine is
+    -- driven by osd_kv/osd_kh/osd_k below; framework default is flat (osd_kv/kh=0).
+    signal reg_curvature_v : std_logic_vector(2 downto 0) := "000"; -- (unused) V-bow
+    signal reg_curvature_h : std_logic_vector(2 downto 0) := "000"; -- (unused) H-bow
     -- LIVE (v3.1 — bilinear pixel fetch in vis_warp_v2_wp):
     -- Default '1' for Phase 5 default-on dev-time testing; HPS-driven
     -- runtime control comes with the v4 Main_MiSTer userland PR.
@@ -169,6 +180,13 @@ architecture wrapper of vis_warp is
     signal reg_curvature_v_s2 : std_logic_vector(2 downto 0) := "000";
     signal reg_curvature_h_s1 : std_logic_vector(2 downto 0) := "000";
     signal reg_curvature_h_s2 : std_logic_vector(2 downto 0) := "000";
+    -- OSD live-tuning CDC (status bits, clk_sys -> clk_in)
+    signal osd_kv_s1          : std_logic_vector(2 downto 0) := "000";
+    signal osd_kv_s2          : std_logic_vector(2 downto 0) := "000";
+    signal osd_kh_s1          : std_logic_vector(2 downto 0) := "000";
+    signal osd_kh_s2          : std_logic_vector(2 downto 0) := "000";
+    signal osd_k_s1           : std_logic_vector(2 downto 0) := "010";
+    signal osd_k_s2           : std_logic_vector(2 downto 0) := "010";
     signal reg_sharpness_s1   : std_logic_vector(2 downto 0) := "010";
     signal reg_sharpness_s2   : std_logic_vector(2 downto 0) := "010";
     signal reg_bilinear_s1    : std_logic := '0';
@@ -187,6 +205,12 @@ architecture wrapper of vis_warp is
     attribute preserve of reg_curvature_v_s2 : signal is true;
     attribute preserve of reg_curvature_h_s1 : signal is true;
     attribute preserve of reg_curvature_h_s2 : signal is true;
+    attribute preserve of osd_kv_s1 : signal is true;
+    attribute preserve of osd_kv_s2 : signal is true;
+    attribute preserve of osd_kh_s1 : signal is true;
+    attribute preserve of osd_kh_s2 : signal is true;
+    attribute preserve of osd_k_s1 : signal is true;
+    attribute preserve of osd_k_s2 : signal is true;
     attribute preserve of reg_sharpness_s1 : signal is true;
     attribute preserve of reg_sharpness_s2 : signal is true;
     attribute preserve of reg_bilinear_s1  : signal is true;
@@ -253,6 +277,9 @@ begin
             reg_curvature_v_s2 <= reg_curvature_v_s1;
             reg_curvature_h_s1 <= reg_curvature_h;
             reg_curvature_h_s2 <= reg_curvature_h_s1;
+            osd_kv_s1 <= osd_kv;  osd_kv_s2 <= osd_kv_s1;
+            osd_kh_s1 <= osd_kh;  osd_kh_s2 <= osd_kh_s1;
+            osd_k_s1  <= osd_k;   osd_k_s2  <= osd_k_s1;
             reg_sharpness_s1 <= reg_sharpness;
             reg_sharpness_s2 <= reg_sharpness_s1;
             reg_bilinear_s1  <= reg_bilinear;
@@ -283,9 +310,12 @@ begin
             reset       => v2_reset_sync,
 
             warp_en     => reg_enable_s2,
-            curvature_k => unsigned(reg_curvature_s2),
-            curvature_v => unsigned(reg_curvature_v_s2),
-            curvature_h => unsigned(reg_curvature_h_s2),
+            -- k/kv/kh now come from the OSD sliders (CDC'd). The reg_curvature*
+            -- (cmd-0x45 path) regs are retained for a future firmware path but no
+            -- longer drive the engine on this core.
+            curvature_k => unsigned(osd_k_s2),
+            curvature_v => unsigned(osd_kv_s2),
+            curvature_h => unsigned(osd_kh_s2),
             sharpness   => unsigned(reg_sharpness_s2),
             bilinear_en => reg_bilinear_s2,
 

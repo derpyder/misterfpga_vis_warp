@@ -110,30 +110,62 @@ nearby. Pattern:
 In the core's `.qsf`:
 ```tcl
 set_global_assignment -name VERILOG_MACRO "MISTER_WARP=1"
+# crisp 2x engine (the line-doubling fix) — recommended; bow on both axes:
+set_global_assignment -name VERILOG_MACRO "MISTER_WARP_HIRES=1"
 ```
+(Omit `MISTER_WARP_HIRES` for the stock source-res engine, or use
+`MISTER_WARP_CYL` for the M9K-frugal cylindrical variant. Pick at most one;
+HIRES wins if both are set. Needs ≥2× `clk_vid` headroom over `ce_pix`.)
 
 ---
 
-## Step 5 — Set the warp defaults (until v4 OSD userland)
+## Step 5 — Wire the live OSD sliders
 
-> **The goal is to expose curvature and sharpness as runtime OSD sliders** — a
-> v4 *Video Processing → Warp* menu in Main_MiSTer (same shape as shadowmask).
-> The RTL registers are **already runtime-capable** (`cmd 0x45`), so v4 is
-> purely C-side UI work — no RTL rework. Until it lands, and because you compile
-> each core yourself, these are **build-time defaults**: edit, recompile, reload.
-> (See [`ROADMAP.md`](./ROADMAP.md) §v4.)
+**v4's goal — runtime OSD control — is reached per-core today.** Four CONF_STR
+options drive the warp live (Vert/Horz Bow, Curve Depth, Vignette), CDC-synced,
+tunable on the cab — no firmware, no per-build variants. The plumbing through
+`sys/` is vendored already (Step 2), so the only per-core work is **two edits in
+your core's top `.sv`**.
 
-Two knobs, each a 3-bit value in `sys/vis_warp.vhd` (architecture `wrapper`,
-~line 104 and ~line 114). Edit, recompile in Quartus, reload.
+**5a — Two `emu` outputs.** Cores that `` `include "sys/emu_ports.vh" `` have them
+already (vendored in Step 2, gated by `MISTER_WARP`):
+```verilog
+output  [8:0] VIS_WARP_CURV,   // [2:0]=kv Vert Bow, [5:3]=kh Horz Bow, [8:6]=k Curve Depth
+output  [5:0] VIS_WARP_FX,     // [2:0]=vignette ([5:3] reserved)
+```
+Older cores with an **inline** `module emu (...)` port list add the two outputs
+there yourself, inside `` `ifdef MISTER_WARP / `endif ``.
 
-**Curvature** — `reg_curvature`, how hard the glass bows:
+**5b — Four CONF_STR sliders** on any free `status[]` bits (12 total). Robotron's map:
+```verilog
+"O[17:15],CRT Vert Bow,Off,1,2,3,4,5,6,7;",
+"O[20:18],CRT Horz Bow,Off,1,2,3,4,5,6,7;",
+"O[23:21],CRT Curve Depth,Default,1,2,3,4,5,6,7;",
+"O[26:24],CRT Vignette,Off,1,2,3,4,5,6,7;",
+```
+(Old `"O8A,..."` letter notation works too — just don't collide with the core's
+existing bits.)
 
-| value | k | look |
-|-------|---|------|
-| `"000"` | 0 | flat (no bow) |
-| `"010"` | 2 | **tasteful default** (shipped) |
-| `"100"` | 4 | strong |
-| `"111"` | 7 | extreme arcade-tube bow |
+**5c — Map the bits to the outputs:**
+```verilog
+`ifdef MISTER_WARP
+// Curve Depth 0 = "Default" -> k=2 (engine default). Vignette [5:3] reserved.
+wire [2:0] warp_k = (status[23:21] == 3'd0) ? 3'd2 : status[23:21];
+assign VIS_WARP_CURV = {warp_k, status[20:18], status[17:15]};
+assign VIS_WARP_FX   = {3'd0, status[26:24]};
+`endif
+```
+That's it. Vendored `sys_top.v` already routes `VIS_WARP_CURV` into the engine
+(`osd_kv/osd_kh/osd_k`, CDC'd) and `VIS_WARP_FX` into the post-warp vignette
+(`sys/crt_postfx.v`). Build, load — the sliders are live in the OSD. Wire nothing
+and the core is visually stock (curvature/vignette default to 0 = flat/off).
+
+---
+
+### Build-time knob (no slider yet) — sharpness
+
+One knob still has no OSD slider and stays a build-time default in
+`sys/vis_warp.vhd` (architecture `wrapper`, ~line 114). Edit, recompile, reload.
 
 **Sharpness** — `reg_sharpness`, sharp-bilinear K. A warp resamples, so plain
 bilinear looks soft; K snaps toward nearest-neighbor inside a thin transition
@@ -153,7 +185,7 @@ then back off one. K=4 is the validated sweet spot (Robotron + Template grid).
 The initializers:
 ```vhdl
 signal reg_enable    : std_logic := '1';                       -- on
-signal reg_curvature : std_logic_vector(2 downto 0) := "010";  -- k=2  (bow)
+signal reg_curvature : std_logic_vector(2 downto 0) := "000";  -- bow now OSD-driven (Step 5); dead default
 signal reg_sharpness : std_logic_vector(2 downto 0) := "100";  -- K=4 (sharp)
 signal reg_bilinear  : std_logic := '1';                       -- smooth
 ```
@@ -189,8 +221,8 @@ signal reg_bilinear  : std_logic := '1';                       -- smooth
 
 | Core | Class | Status |
 |---|---|---|
-| Template (mycore) | dev rig | ✅ validated, symmetric |
-| Arcade-Robotron (+ Joust/Stargate/Bubbles/Splat/Alien★ar) | live-input, landscape | ✅ validated, symmetric on 4:3 |
+| Template (mycore) | dev rig | ✅ validated, symmetric; live OSD sliders + vignette |
+| Arcade-Robotron (+ Joust/Stargate/Bubbles/Splat/Alien★ar) | live-input, landscape | ✅ shipped — hi-res 2×, live OSD bows + vignette, twin-stick fire |
 | Arcade-Galaga | rotated/framebuffer | ❌ SITE C bypassed — needs framebuffer-path variant |
 
 The Williams multi-core means one Robotron-VIS build covers a half-dozen

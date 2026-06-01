@@ -1737,7 +1737,14 @@ reg        vis_warp_cmd_wr = 0;
 `ifdef MISTER_WARP
 wire [7:0] vw_r, vw_g, vw_b;
 wire       vw_hs, vw_vs, vw_de, vw_ce_pix_out;
+wire [8:0] vis_warp_curv;   // OSD warp sliders from emu: [2:0]=kv, [5:3]=kh, [8:6]=k
+wire [5:0] vis_warp_fx;     // OSD postfx sliders from emu: [2:0]=vignette ([5:3] reserved)
 
+// MISTER_WARP_HIRES (alt to MISTER_WARP_CYL): spherical hi-res 2x warp
+// (WARP_N_LINES=128, OUT_SCALE=2) = line-doubling fix WITH the vertical bow; this
+// is the path Robotron shipped/HW-validated. MISTER_WARP_CYL is the M9K-frugal
+// cylindrical-reclaim variant (kv=0). Pick at most one; HIRES wins if both set.
+//
 // MISTER_WARP_CYL (optional, on top of MISTER_WARP): the cylindrical-reclaim +
 // hi-res build. WARP_N_LINES=2 (2-line buffer ⇒ cyl, kv=0) + WARP_OUT_SCALE=2
 // (warp/emit at 2x width ⇒ ascal downscales ⇒ the line-doubling fix). ascal MUST
@@ -1745,7 +1752,9 @@ wire       vw_hs, vw_vs, vw_de, vw_ce_pix_out;
 // have >=2x clk_vid headroom over ce_pix (Template: ce_pix is 1-in-2 on a 20 MHz
 // clk_vid ⇒ headroom present). Without the macro: the stock spherical source-res
 // engine, byte-identical (no generics, VHDL defaults).
-`ifdef MISTER_WARP_CYL
+`ifdef MISTER_WARP_HIRES
+vis_warp #(.WARP_N_LINES(128), .WARP_OUT_SCALE(2)) u_vis_warp_siteC
+`elsif MISTER_WARP_CYL
 vis_warp #(.WARP_N_LINES(2), .WARP_OUT_SCALE(2)) u_vis_warp_siteC
 `else
 vis_warp u_vis_warp_siteC
@@ -1756,6 +1765,9 @@ vis_warp u_vis_warp_siteC
 	.clk_out     (clk_vid),       // unused at site C; tied to clk_in
 	.cmd_wr      (vis_warp_cmd_wr),
 	.cmd_in      (vis_warp_cmd_data),
+	.osd_kv      (vis_warp_curv[2:0]),  // live OSD bow sliders (CDC'd inside)
+	.osd_kh      (vis_warp_curv[5:3]),
+	.osd_k       (vis_warp_curv[8:6]),
 	.ce_pix_in   (ce_pix),
 	.r_in        (r_out),
 	.g_in        (g_out),
@@ -1772,17 +1784,37 @@ vis_warp u_vis_warp_siteC
 	.de_out      (vw_de)
 );
 
-`ifdef MISTER_WARP_CYL
-assign ce_hpix  = vw_ce_pix_out;  // hi-res: ascal samples the 2x-wide warped raster
+`ifdef MISTER_WARP_HIRES
+wire        vw_ce = vw_ce_pix_out;  // hi-res: ascal samples the 2x-wide warped raster
+`elsif MISTER_WARP_CYL
+wire        vw_ce = vw_ce_pix_out;
 `else
-assign ce_hpix  = ce_pix;         // source-res: output enable matches the input
+wire        vw_ce = ce_pix;         // source-res: output enable matches the input
 `endif
-assign hr_out   = vw_r;
-assign hg_out   = vw_g;
-assign hb_out   = vw_b;
-assign hhs_fix  = vw_hs;
-assign hvs_fix  = vw_vs;
-assign hde_emu  = vw_de;
+
+// Post-warp CRT screen effect: radial vignette. Operates on the warp OUTPUT
+// raster (clk_vid, vw_ce) so it cannot affect warp geometry / de-doubling.
+// vignette=0 -> transparent passthrough (fixed delay only).
+wire [7:0]  fx_r, fx_g, fx_b;
+wire        fx_hs, fx_vs, fx_de;
+crt_postfx u_crt_postfx
+(
+	.clk      (clk_vid),
+	.ce       (vw_ce),
+	.r_in     (vw_r),  .g_in (vw_g),  .b_in (vw_b),
+	.hs_in    (vw_hs), .vs_in(vw_vs), .de_in(vw_de),
+	.vignette (vis_warp_fx[2:0]),
+	.r_out    (fx_r),  .g_out(fx_g),  .b_out(fx_b),
+	.hs_out   (fx_hs), .vs_out(fx_vs), .de_out(fx_de)
+);
+
+assign ce_hpix  = vw_ce;
+assign hr_out   = fx_r;
+assign hg_out   = fx_g;
+assign hb_out   = fx_b;
+assign hhs_fix  = fx_hs;
+assign hvs_fix  = fx_vs;
+assign hde_emu  = fx_de;
 `else
 // MISTER_WARP unset: stock pass-through (= upstream Template behavior).
 assign ce_hpix  = ce_pix;
@@ -1849,6 +1881,11 @@ emu emu
 
 `ifndef MISTER_DUAL_SDRAM
 	.VGA_DISABLE(VGA_DISABLE),
+`endif
+
+`ifdef MISTER_WARP
+	.VIS_WARP_CURV(vis_warp_curv),   // OSD bow sliders -> SITE C warp
+	.VIS_WARP_FX(vis_warp_fx),       // OSD vignette -> post-warp crt_postfx
 `endif
 
 	.HDMI_WIDTH(direct_video ? 12'd0 : hdmi_width),

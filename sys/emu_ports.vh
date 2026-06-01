@@ -150,4 +150,12 @@ input         UART_DSR,
 input   [6:0] USER_IN,
 output  [6:0] USER_OUT,
 
+`ifdef MISTER_WARP
+// vis_warp SITE C live-tuning: OSD sliders out to sys_top's vis_warp.
+// [2:0]=Vert Bow (kv), [5:3]=Horz Bow (kh), [8:6]=Curve Depth (k).
+output  [8:0] VIS_WARP_CURV,
+// Post-warp CRT effects: [2:0]=Vignette ([5:3] reserved).
+output  [5:0] VIS_WARP_FX,
+`endif
+
 input         OSD_STATUS

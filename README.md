@@ -22,23 +22,27 @@ quartus: 17.0.2 Lite (free edition)
 
 ## On hardware — Robotron (first consumer core)
 
+![Robotron in-game: barrel bow + vignette, live on hardware](docs/screenshots/robotron-warp-vignette-hw.jpg)
+
+In-game on a DE10-nano over HDMI: the playfield border bows into a barrel and the
+corners darken under the vignette — both dialed live from the OSD, and crisp on
+the **spherical hi-res 2× engine** (no line-doubling).
+
 | Barrel warp | Warp + CRT shadowmask |
 |---|---|
 | ![Robotron title with vis_warp](docs/screenshots/robotron-warp-title.jpg) | ![Robotron + shadowmask](docs/screenshots/robotron-warp-crt-mask.jpg) |
 
 Symmetric barrel across the native 4:3 frame (self-tuning sync-delay), with
-the CRT shadowmask stacked downstream so the mask border curves *with* the
-tube. DE10-nano over HDMI.
+the CRT shadowmask stacked downstream so the mask border curves *with* the tube.
 
-> **⚠️ Preview, not a polished release.** This baked-warp build has the known
-> **line-doubling** issue — 1-pixel content (text, thin lines) splits into two
-> rows in the magnified center. It's a proven resample limit, not a bug, fixed by
-> the in-progress [hi-res warp](./SPEC-hires-warp-2026-05-30.md) (see
-> [`LIMITATIONS.md`](./LIMITATIONS.md)). Smooth content looks right; 1px pixel-art
-> does not. Try it to see the effect; run warp-off if the doubling bothers you.
+> **✅ Shipped — live OSD CRT controls.** Tune **Vert/Horz Bow, Curve Depth and
+> Vignette** in real time from the OSD; no firmware, no per-build variants. The
+> earlier **line-doubling** of 1-pixel content is fixed by the spherical hi-res 2×
+> engine (`MISTER_WARP_HIRES`) — 1px text/lines stay single (details in
+> [`LIMITATIONS.md`](./LIMITATIONS.md)).
 
-**▶ Try the preview (no Quartus):** pre-built core + drop-in MRAs for **6
-Williams games** (Robotron, Joust, Stargate, Bubbles, Splat, Alien Arena)
+**▶ Try it (no Quartus):** pre-built core + drop-in MRAs for **6 Williams games**
+(Robotron, Joust, Stargate, Bubbles, Splat, Alien Arena)
 — [**Robotron-VIS release**](https://github.com/derpyder/Arcade-Robotron_MiSTer-VIS/releases/latest).
 Copy the `.rbf` to `_Arcade/cores/`, the `(vis_warp).mra` files to
 `_Arcade/`, bring your own MAME ROMs.
@@ -47,19 +51,28 @@ Full consumer core + install guide:
 [`Arcade-Robotron_MiSTer-VIS`](https://github.com/derpyder/Arcade-Robotron_MiSTer-VIS).
 Adopt your own core: [`ADOPTING-A-CORE.md`](./ADOPTING-A-CORE.md).
 
-### Tunable controls
+### Tunable controls — live on the cab
 
-Runtime parameters live as `cmd 0x45` registers (CDC-synced, OSD-driven in
-v4 — global Video Processing menu, like shadowmask, *not* per-core CONF_STR):
+Per-core **OSD sliders**, dialed in real time (CONF_STR → `status[]` →
+`VIS_WARP_CURV`/`VIS_WARP_FX` → CDC-synced into the warp). Shipped + HW-validated
+on Robotron — no firmware, no per-build variants:
 
-- **Enable** · **Curvature** (k=0–7) · **Sharpness** (sharp-bilinear K —
-  nearest-neighbor snap with a thin transition band; crisp pixels, smooth
-  curve) — all wired today, defaulting until the v4 OSD sliders land.
-- **Coming** (specs in [`EFFECTS-BACKLOG.md`](./EFFECTS-BACKLOG.md)): overscan/
-  zoom, vignette, corner-rounding (Tier 1, cheap); H/V curvature, pincushion,
-  warped scanlines (Tier 2); **bloom** (flagship, source-res phosphor glow).
-  All ride on geometry the warp already computes; none duplicate MiSTer's
-  downstream mask/scanline/gamma stack — they stack on top.
+- **CRT Vert Bow** (kv 0–7) · **CRT Horz Bow** (kh 0–7) · **CRT Curve Depth**
+  (k, Default = 2) — the barrel geometry, on the **spherical hi-res 2× engine**
+  (`MISTER_WARP_HIRES`: warp *and* output at 2× width so the bow stays crisp —
+  the line-doubling fix), with sharp-bilinear sampling underneath.
+- **CRT Vignette** (0–7) — post-warp radial edge-darkening, a self-contained
+  block ([`sys/crt_postfx.v`](./sys/crt_postfx.v)) on the warp's *output* raster
+  so it can't touch the geometry. `vignette=0` = transparent passthrough.
+- The legacy `cmd 0x45` register path (CDC'd) is retained for a future *global*
+  Video Processing menu (shadowmask-style), but the per-core sliders supersede it.
+
+**Attempted + removed:** rounded corners — a raster-anchored mask rounds the black
+border, not the warped content, and the content-following variant waved (see
+[`LIMITATIONS.md`](./LIMITATIONS.md)). Still on the backlog
+([`EFFECTS-BACKLOG.md`](./EFFECTS-BACKLOG.md)): overscan/zoom, pincushion, warped
+scanlines (Tier 2); **bloom** (flagship, source-res phosphor glow). All ride on
+geometry the warp already computes and stack on top of MiSTer's mask/scanline/gamma.
 
 ### Dev rig — the grid test pattern that proves it
 
@@ -167,9 +180,11 @@ the project memory at
 | Spherical engine (barrel) on Template + Robotron | ✅ HW-validated (k=0/2/7) |
 | Sharp-bilinear + self-tuning sync-delay | ✅ HW-validated |
 | Cylindrical engine (Block A) + res-adaptive calibration | ✅ HW-validated on Template |
-| **1px line-doubling** | ⚠️ **Open blocker** — fix specced + sim-proven, not built |
-| Consumer core: Robotron (Williams ×6) | ⚠️ Preview shipped; has the line-doubling issue |
-| Main_MiSTer userland (OSD config + presets) | 📋 v4 roadmap |
+| **1px line-doubling** | ✅ **Fixed** — spherical hi-res 2× (`MISTER_WARP_HIRES`), shipped on Robotron |
+| **Per-core OSD sliders** (Vert/Horz Bow, Curve Depth, Vignette) | ✅ HW-validated on Robotron |
+| Post-warp vignette (`sys/crt_postfx.v`) | ✅ HW-validated on Robotron |
+| Consumer core: Robotron (Williams ×6) | ✅ Shipped — `RobotronVIS_20260531` |
+| Main_MiSTer *global* userland (cross-core presets) | 📋 v4 roadmap |
 | Upstream PR / CI auto-build | 📋 Future |
 
 See [`STATUS.md`](./STATUS.md) for where things stand and what's next,
@@ -186,15 +201,13 @@ You want a pre-compiled `.rbf` for the specific game core you want to
 play with vis_warp. Those live in companion repos:
 
 - **`Arcade-Robotron_MiSTer-VIS`** — Robotron + 5 more Williams games
-  (preview release; has the known line-doubling issue, see
-  [`LIMITATIONS.md`](./LIMITATIONS.md))
+  (shipped — live OSD CRT controls + vignette + twin-stick right-analog fire)
 - (more cores coming — see [`ROADMAP.md`](./ROADMAP.md))
 
 Drop the `.rbf` in `/media/fat/_Arcade/cores/`, drop the matching MRA
-in `/media/fat/_Arcade/`, load via the normal MiSTer arcade menu. Until
-v4 userland lands, curvature is hardcoded into each build — you can pick
-"off / light (k=2) / heavy (k=7)" variants by downloading the
-corresponding `.rbf`.
+in `/media/fat/_Arcade/`, load via the normal MiSTer arcade menu. Open the
+OSD and tune **CRT Vert Bow / Horz Bow / Curve Depth / Vignette** live on the
+cab — curvature is no longer baked per-build.
 
 **ROMs are NOT distributed with this project.** Use your existing MiSTer
 arcade ROM zips — they work unmodified.
@@ -213,12 +226,12 @@ If you want to compile your own vis_warp-enabled core:
    [`ROADMAP.md`](./ROADMAP.md#framework-version-compatibility) for
    notes on older cores that may need per-core `.sv` updates to match
    newer framework port shapes.
-4. **Add `MISTER_WARP=1`** to the core's `.qsf` as a `VERILOG_MACRO`
-   global assignment.
-5. **Set defaults** in `sys/vis_warp.vhd`: `reg_curvature` (bow strength) and
-   `reg_sharpness` (sharp-bilinear K — the fuzzy-pixel fix). Build-time defaults
-   until the v4 OSD sliders land; the registers are already runtime-capable.
-   Full 3-bit encoding tables + a tuning tip: **`ADOPTING-A-CORE.md`, Step 5**.
+4. **Add `MISTER_WARP=1`** (plus `MISTER_WARP_HIRES=1` for the crisp 2× engine —
+   the line-doubling fix) to the core's `.qsf` as `VERILOG_MACRO` global assignments.
+5. **Wire the live OSD sliders** — four CONF_STR options + two `emu` outputs
+   (`VIS_WARP_CURV` / `VIS_WARP_FX`) so players tune **Vert/Horz Bow, Curve Depth
+   and Vignette** on the cab, no rebuild. Five small edits, all spelled out in
+   **`ADOPTING-A-CORE.md`, Step 5** (encoding tables + the bit map included).
 6. **Compile** in Quartus 17.0.2 Lite. Drop `.rbf` on SD, test.
 
 The Template_MiSTer-VIS dev rig (this repo, with `mycore.v` and

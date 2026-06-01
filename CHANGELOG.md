@@ -1,5 +1,53 @@
 # Changelog
 
+## 2026-05-31 — live OSD CRT controls + vignette + hi-res ships (Robotron)
+
+The headline: **you now tune the glass live on the cab.** No firmware, no
+per-build variants — per-core OSD sliders drive the warp in real time. Shipped
+and HW-validated on Robotron (`RobotronVIS_20260531.rbf`), and the Template dev
+rig in this repo is rebuilt to the same integration so adopters get the real
+path, not a preview.
+
+- **Live OSD sliders (the v4-userland goal, reached per-core).** Four CONF_STR
+  options → `status[]` bits → two new `emu` outputs `VIS_WARP_CURV[8:0]` /
+  `VIS_WARP_FX[5:0]` → CDC-synced into the warp engine (`osd_kv/osd_kh/osd_k`)
+  and the post-fx block:
+  - **CRT Vert Bow** (kv 0–7) — rows curve.
+  - **CRT Horz Bow** (kh 0–7) — columns curve → full barrel.
+  - **CRT Curve Depth** (k, Default = 2) — overall bow magnitude.
+  - **CRT Vignette** (0–7) — edge darkening.
+
+  This supersedes the build-time `reg_curvature` defaults and the `cmd 0x45`
+  register path (both retained, dead, for a future *global* Video Processing
+  menu). Wiring is five small edits — see [`ADOPTING-A-CORE.md`](./ADOPTING-A-CORE.md)
+  Step 5.
+
+- **Spherical hi-res 2× is the shipped default — the line-doubling fix WITH the
+  bow** (`MISTER_WARP_HIRES`: `WARP_N_LINES=128`, `OUT_SCALE=2`). Warp *and output*
+  at 2× width, ascal downscales; the barrel stays crisp where the source-res
+  engine doubled 1px content (the Nyquist wall in the previous entry). HW-validated
+  on Robotron — the bows are sharp on the cab. The cylindrical M9K-frugal variant
+  (`MISTER_WARP_CYL`, kv=0) remains a sibling macro.
+
+- **Post-warp vignette** — new self-contained block [`sys/crt_postfx.v`](./sys/crt_postfx.v).
+  It measures the active area from the sync, computes per-frame reciprocals, and
+  runs a fixed-latency Q15 pipeline on the warp's **output** raster, so it cannot
+  perturb the warp geometry or the hi-res de-doubling. `vignette=0` = transparent
+  passthrough. Gotcha documented in-file: a Verilog `a*b >> n` written into a
+  narrow target truncates the *product* before the shift (whole-screen-black) —
+  fixed with explicit wide intermediate wires.
+
+- **Twin-stick right-analog fire** (Robotron core-side) — the right analog stick
+  maps to the four fire directions, so a single dual-stick pad plays Robotron the
+  way it was meant to. Shipped in the Robotron consumer release.
+
+- **Rounded corners — attempted and removed.** A raster-anchored corner mask
+  rounds the *black border*, not the barrel-warped content (the content pulls
+  inward, away from the mask); the content-following warp variant introduced
+  visible wave artifacts at all bow levels. Cut from the ship build. Logged in
+  [`LIMITATIONS.md`](./LIMITATIONS.md); the geometry-correct approach stays on
+  the backlog.
+
 ## Unreleased — cylindrical engine + the line-doubling fix (2026-05-29 → 30)
 
 Active work on branch `feature/cylindrical-warp-blockA`. **Not a cut release** —

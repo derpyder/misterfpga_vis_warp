@@ -34,6 +34,15 @@ assign VGA_SL = 0;
 assign VGA_F1 = 0;
 assign VGA_SCALER  = 0;
 assign VGA_DISABLE = 0;
+
+`ifdef MISTER_WARP
+// vis_warp live OSD tuning: CONF_STR sliders -> SITE C warp + post-fx.
+// Curve Depth 0 = "Default" -> k=2 (engine default). Vignette [5:3] reserved.
+wire [2:0] warp_k = (status[23:21] == 3'd0) ? 3'd2 : status[23:21];
+assign VIS_WARP_CURV = {warp_k, status[20:18], status[17:15]};
+assign VIS_WARP_FX   = {3'd0, status[26:24]};
+`endif
+
 assign HDMI_FREEZE = 0;
 assign HDMI_BLACKOUT = 0;
 assign HDMI_BOB_DEINT = 0;
@@ -63,6 +72,11 @@ localparam CONF_STR = {
 	"O[4:3],Noise,White,Red,Green,Blue;",
 	"O[13:11],Pattern,Cosine,Grid,VBars,Gradient,Crosshair,Gray50,Black,White;",
 	"O[14],Source res,480x360,320x240;",
+	"-;",
+	"O[17:15],CRT Vert Bow,Off,1,2,3,4,5,6,7;",
+	"O[20:18],CRT Horz Bow,Off,1,2,3,4,5,6,7;",
+	"O[23:21],CRT Curve Depth,Default,1,2,3,4,5,6,7;",
+	"O[26:24],CRT Vignette,Off,1,2,3,4,5,6,7;",
 	"-;",
 	"P1,Test Page 1;",
 	"P1-;",

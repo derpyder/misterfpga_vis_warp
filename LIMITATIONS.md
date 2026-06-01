@@ -8,28 +8,29 @@ project. Current state lives in [`STATUS.md`](./STATUS.md).
 
 ---
 
-## ⚠️ The current #1 issue — line-doubling of 1-pixel content
+## ✅ FIXED — line-doubling of 1-pixel content (spherical hi-res 2×)
 
-A source-resolution sharp warp renders **single-pixel features (grid lines,
-text) as two thin rows with a gap** in the magnified center band. It's on
-hardware today (Robotron, baked k=2). It's a **Nyquist wall, proven bit-exact**
-([`sim/warp_bitexact.py`](./sim/warp_bitexact.py)), not a tuning bug:
+*Was the #1 blocker through 2026-05-30. Fixed and shipped on Robotron
+(`MISTER_WARP_HIRES`); it's the default the Template builds with.*
 
-- A full-screen barrel warp must magnify the center (~16% at k=2) so the bowed
-  edges don't pull black into the corners (the overscan fill). 1 source px → ~1.16
-  output px.
-- Sharp-bilinear (near-nearest-neighbor) point-sampling of that **non-integer
-  magnification** lands a 1px feature in one output column for some lines and two
-  for others → the doubling. Smooth / ≥2px content survives — which is why
-  gradients look fine and the grid torture pattern exposes it.
+A source-resolution sharp warp rendered **single-pixel features (grid lines,
+text) as two thin rows with a gap** in the magnified center band — a **Nyquist
+wall, proven bit-exact** ([`sim/warp_bitexact.py`](./sim/warp_bitexact.py)), not a
+tuning bug:
 
-**Consequence:** no current build is a polished release. The baked-warp Robotron
-build is a preview — run warp-off, or wait for the fix.
+- A full-screen barrel must magnify the center (~16% at k=2) so the bowed edges
+  don't pull black into the corners (the overscan fill). 1 source px → ~1.16 out px.
+- Sharp-bilinear point-sampling of that **non-integer magnification** lands a 1px
+  feature in one output column for some lines and two for others → the doubling.
+  Smooth / ≥2px content survived — which is why gradients looked fine and the grid
+  torture pattern exposed it.
 
-**The fix is specced and sim-proven (not built):** warp *and output* at 2×
-internal resolution, with ascal doing the downscale →
-[`SPEC-hires-warp-2026-05-30.md`](./SPEC-hires-warp-2026-05-30.md). Ruled-out
-approaches (softer LUT, no-overscan, prescale-then-decimate) are listed there so
+**The fix (shipped):** warp *and output* at 2× internal resolution
+(`WARP_N_LINES=128, OUT_SCALE=2`), with ascal doing the downscale (crt-royale's
+method). The 2× raster restores the headroom to place 1px features without
+splitting, and the barrel stays crisp. HW-validated on Robotron. Spec:
+[`SPEC-hires-warp-2026-05-30.md`](./SPEC-hires-warp-2026-05-30.md) — ruled-out
+approaches (softer LUT, no-overscan, prescale-then-decimate) listed there so
 nobody retries them.
 
 ---
