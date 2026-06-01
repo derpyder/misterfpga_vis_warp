@@ -145,8 +145,8 @@ The milestone: **symmetric barrel validated on a real arcade core
 - **`ADOPTING-A-CORE.md`** added — the repeatable pipeline: static-read
   candidacy check (live-input vs rotated), vendor 4 files, 3 identical
   sys_top edits, macro, build. No line-timing constant.
-- Williams multi-core means Robotron-VIS also covers Joust/Stargate/
-  Bubbles/Splat/Alien★ar (all `landscape=1`).
+- Williams multi-core means Robotron-VIS should also cover Joust/Stargate/
+  Bubbles/Splat/Alien★ar (all `landscape=1`) — only Robotron is tested.
 
 Notes: HDMI wants the front-end scandoubler OFF (ascal scales the warped
 native; scandoubler-on feeds doubled lines that resolution-gate the bow).

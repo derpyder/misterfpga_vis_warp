@@ -41,8 +41,9 @@ the CRT shadowmask stacked downstream so the mask border curves *with* the tube.
 > engine (`MISTER_WARP_HIRES`) — 1px text/lines stay single (details in
 > [`LIMITATIONS.md`](./LIMITATIONS.md)).
 
-**▶ Try it (no Quartus):** pre-built core + drop-in MRAs for **6 Williams games**
-(Robotron, Joust, Stargate, Bubbles, Splat, Alien Arena)
+**▶ Try it (no Quartus):** pre-built core + drop-in MRAs — **Robotron** (the
+hardware-tested one) plus Joust, Stargate, Bubbles, Splat and Alien Arena on the
+same landscape core (untested)
 — [**Robotron-VIS release**](https://github.com/derpyder/Arcade-Robotron_MiSTer-VIS/releases/latest).
 Copy the `.rbf` to `_Arcade/cores/`, the `(vis_warp).mra` files to
 `_Arcade/`, bring your own MAME ROMs.
@@ -183,7 +184,8 @@ the project memory at
 | **1px line-doubling** | ✅ **Fixed** — spherical hi-res 2× (`MISTER_WARP_HIRES`), shipped on Robotron |
 | **Per-core OSD sliders** (Vert/Horz Bow, Curve Depth, Vignette) | ✅ HW-validated on Robotron |
 | Post-warp vignette (`sys/crt_postfx.v`) | ✅ HW-validated on Robotron |
-| Consumer core: Robotron (Williams ×6) | ✅ Shipped — `RobotronVIS_20260531` |
+| Consumer core: Robotron | ✅ Shipped + HW-tested — `RobotronVIS_20260531` |
+| 5 more landscape Williams on the same core (Joust/Stargate/Bubbles/Splat/Alien) | ⚠️ should warp — untested |
 | Main_MiSTer *global* userland (cross-core presets) | 📋 v4 roadmap |
 | Upstream PR / CI auto-build | 📋 Future |
 
@@ -200,8 +202,9 @@ See [`STATUS.md`](./STATUS.md) for where things stand and what's next,
 You want a pre-compiled `.rbf` for the specific game core you want to
 play with vis_warp. Those live in companion repos:
 
-- **`Arcade-Robotron_MiSTer-VIS`** — Robotron + 5 more Williams games
-  (shipped — live OSD CRT controls + vignette + twin-stick right-analog fire)
+- **`Arcade-Robotron_MiSTer-VIS`** — **Robotron** (shipped + HW-tested: live OSD
+  CRT controls + vignette + twin-stick fire) + 5 more landscape Williams games on
+  the same core (Joust, Stargate, Bubbles, Splat, Alien Arena — untested)
 - (more cores coming — see [`ROADMAP.md`](./ROADMAP.md))
 
 Drop the `.rbf` in `/media/fat/_Arcade/cores/`, drop the matching MRA

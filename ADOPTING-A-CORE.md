@@ -222,9 +222,10 @@ signal reg_bilinear  : std_logic := '1';                       -- smooth
 | Core | Class | Status |
 |---|---|---|
 | Template (mycore) | dev rig | ✅ validated, symmetric; live OSD sliders + vignette |
-| Arcade-Robotron (+ Joust/Stargate/Bubbles/Splat/Alien★ar) | live-input, landscape | ✅ shipped — hi-res 2×, live OSD bows + vignette, twin-stick fire |
+| Arcade-Robotron | live-input, landscape | ✅ shipped + **HW-tested** — hi-res 2×, live OSD bows + vignette, twin-stick fire |
+| + Joust/Stargate/Bubbles/Splat/Alien★ar (same core) | live-input, landscape | ⚠️ should warp — **untested** |
 | Arcade-Galaga | rotated/framebuffer | ❌ SITE C bypassed — needs framebuffer-path variant |
 
-The Williams multi-core means one Robotron-VIS build covers a half-dozen
-`landscape=1` titles. Sinistar/Playball on that core are `landscape=0`
+The Williams multi-core means one Robotron-VIS build *should* cover a half-dozen
+`landscape=1` titles, **though only Robotron is hardware-tested.** Sinistar/Playball on that core are `landscape=0`
 (rotated) → the ❌ class.
