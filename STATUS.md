@@ -1,6 +1,6 @@
 # STATUS — vis_warp (single source of truth)
 
-**Last updated:** 2026-05-30. **Read this first.** This file replaces the
+**Last updated:** 2026-05-31. **Read this first.** This file replaces the
 rolling `HANDOFF-*.md` docs — it is the one place that says where the project
 actually is, what works, what's broken, and what to do next. When it conflicts
 with any other doc, this one wins (then fix the other doc).
@@ -14,6 +14,14 @@ vis_warp is a framework-level CRT screen-curvature video processor for MiSTer
 **upstream of the scaler** so the OSD stays straight and the bow scales with any
 HDMI mode.
 
+- **Live OSD CRT controls shipped (2026-05-31).** Per-core OSD sliders — Vert/Horz
+  Bow, Curve Depth, Vignette — drive the warp and a new post-warp vignette block
+  (`sys/crt_postfx.v`) live on the cab, CDC-synced (CONF_STR → `VIS_WARP_CURV` /
+  `VIS_WARP_FX`). Shipped + HW-validated on Robotron (`RobotronVIS_20260531`); the
+  Template dev rig is rebuilt to the same integration (`MISTER_WARP_HIRES` the build
+  default, full compile clean, setup +0.464 ns). Rounded corners were attempted and
+  cut (a raster-anchored mask rounds the black border, not the warped content; the
+  content-following variant waved). Both forks pushed.
 - **It runs on hardware.** Barrel warp validated on the Template grid and on
   Robotron; the cylindrical engine's res-adaptive calibration is HW-proven.
 - **The line-doubling blocker is FIXED — confirmed on hardware (2026-05-31).** A
